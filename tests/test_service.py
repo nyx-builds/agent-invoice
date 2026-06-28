@@ -1,9 +1,11 @@
 """Tests for the service layer."""
 
 import pytest
+import tempfile
 from datetime import date
+from pathlib import Path
 
-from agent_invoice.models import InvoiceStatus, RecurrenceFrequency
+from agent_invoice.models import InvoiceStatus, Payment, RecurrenceFrequency
 from agent_invoice.service import InvoiceService
 from agent_invoice.store import InvoiceStore
 
@@ -110,6 +112,7 @@ class TestInvoiceService:
         assert inv.subtotal == 2500.0
         assert inv.status == InvoiceStatus.DRAFT
         assert inv.due_date is not None
+        assert inv.payments == []
 
     def test_create_invoice_with_tax_per_item(self, service):
         self._setup_client(service)
@@ -316,6 +319,221 @@ class TestInvoiceService:
         service.mark_paid(inv.id)
         with pytest.raises(ValueError, match="Cannot apply discount"):
             service.apply_discount(inv.id, 25.0)
+
+
+class TestPaymentService:
+    def _setup_invoice(self, service, amount=100.0):
+        """Helper to create a client and invoice."""
+        service.add_client(name="Acme")
+        return service.create_invoice(
+            client_identifier="Acme",
+            line_items=[{"description": "Work", "unit_price": amount}],
+        )
+
+    def test_record_payment_full(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        updated = service.record_payment(inv.id, 100.0)
+        assert updated.status == InvoiceStatus.PAID
+        assert updated.amount_paid == 100.0
+        assert updated.amount_remaining == 0.0
+        assert len(updated.payments) == 1
+        assert updated.paid_date is not None
+
+    def test_record_payment_partial(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        updated = service.record_payment(inv.id, 50.0, method="bank_transfer")
+        assert updated.status == InvoiceStatus.PARTIALLY_PAID
+        assert updated.amount_paid == 50.0
+        assert updated.amount_remaining == 50.0
+        assert len(updated.payments) == 1
+
+    def test_record_payment_two_partials(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        service.record_payment(inv.id, 60.0, method="credit_card")
+        updated = service.record_payment(inv.id, 40.0, method="bank_transfer")
+        assert updated.status == InvoiceStatus.PAID
+        assert updated.amount_paid == 100.0
+        assert updated.amount_remaining == 0.0
+        assert len(updated.payments) == 2
+
+    def test_record_payment_with_method_and_reference(self, service):
+        inv = self._setup_invoice(service, 500.0)
+        updated = service.record_payment(
+            inv.id, 500.0,
+            method="crypto",
+            reference="0xabc123",
+            notes="ETH payment",
+        )
+        assert updated.payments[0].method == "crypto"
+        assert updated.payments[0].reference == "0xabc123"
+        assert updated.payments[0].notes == "ETH payment"
+
+    def test_record_payment_custom_date(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        updated = service.record_payment(inv.id, 100.0, payment_date=date(2026, 1, 15))
+        assert updated.payments[0].payment_date == date(2026, 1, 15)
+
+    def test_record_payment_zero_fails(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        with pytest.raises(ValueError, match="must be positive"):
+            service.record_payment(inv.id, 0.0)
+
+    def test_record_payment_negative_fails(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        with pytest.raises(ValueError, match="must be positive"):
+            service.record_payment(inv.id, -50.0)
+
+    def test_record_payment_overpayment_fails(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        with pytest.raises(ValueError, match="exceeds remaining"):
+            service.record_payment(inv.id, 150.0)
+
+    def test_record_payment_cancelled_invoice_fails(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        service.cancel_invoice(inv.id)
+        with pytest.raises(ValueError, match="cancelled"):
+            service.record_payment(inv.id, 50.0)
+
+    def test_record_payment_already_paid_fails(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        service.record_payment(inv.id, 100.0)
+        with pytest.raises(ValueError, match="already fully paid"):
+            service.record_payment(inv.id, 10.0)
+
+    def test_record_payment_invoice_not_found(self, service):
+        with pytest.raises(ValueError, match="not found"):
+            service.record_payment("INV-9999", 50.0)
+
+    def test_list_payments(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        service.record_payment(inv.id, 30.0, method="credit_card")
+        service.record_payment(inv.id, 70.0, method="bank_transfer")
+        payments = service.list_payments(inv.id)
+        assert len(payments) == 2
+        assert payments[0].amount == 30.0
+        assert payments[0].method == "credit_card"
+        assert payments[1].amount == 70.0
+        assert payments[1].method == "bank_transfer"
+
+    def test_list_payments_empty(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        payments = service.list_payments(inv.id)
+        assert payments == []
+
+    def test_list_payments_invoice_not_found(self, service):
+        with pytest.raises(ValueError, match="not found"):
+            service.list_payments("INV-9999")
+
+    def test_remove_payment(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        updated = service.record_payment(inv.id, 50.0, method="credit_card")
+        payment_id = updated.payments[0].id
+
+        result = service.remove_payment(inv.id, payment_id)
+        assert result.amount_paid == 0.0
+        assert result.amount_remaining == 100.0
+        assert result.status == InvoiceStatus.DRAFT
+
+    def test_remove_payment_from_paid_invoice(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        updated = service.record_payment(inv.id, 100.0)
+        assert updated.status == InvoiceStatus.PAID
+
+        payment_id = updated.payments[0].id
+        result = service.remove_payment(inv.id, payment_id)
+        assert result.status == InvoiceStatus.DRAFT
+        assert result.paid_date is None
+
+    def test_remove_payment_nonexistent(self, service):
+        inv = self._setup_invoice(service, 100.0)
+        with pytest.raises(ValueError, match="not found on invoice"):
+            service.remove_payment(inv.id, "PMT-NONEXIST")
+
+    def test_payment_with_tax_and_discount(self, service):
+        """Test partial payment on invoice with tax and discount."""
+        service.add_client(name="Acme")
+        inv = service.create_invoice(
+            client_identifier="Acme",
+            line_items=[{"description": "Work", "unit_price": 100.0, "tax_rate": 10.0}],
+            discount_amount=10.0,
+        )
+        # total = 100 + 10 - 10 = 100
+        updated = service.record_payment(inv.id, 50.0)
+        assert updated.amount_paid == 50.0
+        assert updated.amount_remaining == 50.0
+        assert updated.status == InvoiceStatus.PARTIALLY_PAID
+
+
+class TestPDFExport:
+    def test_export_pdf_basic(self, service, tmp_path):
+        service.add_client(name="Acme Corp")
+        inv = service.create_invoice(
+            client_identifier="Acme Corp",
+            line_items=[{"description": "Code review", "quantity": 10, "unit_price": 150.0}],
+        )
+        output = str(tmp_path / "test_invoice.pdf")
+        result = service.export_pdf(inv.id, output_path=output)
+        assert result == output
+        assert Path(output).exists()
+        assert Path(output).stat().st_size > 0
+
+    def test_export_pdf_with_company_info(self, service, tmp_path):
+        service.add_client(name="Acme Corp")
+        inv = service.create_invoice(
+            client_identifier="Acme Corp",
+            line_items=[{"description": "Service", "unit_price": 500.0}],
+        )
+        output = str(tmp_path / "test_company.pdf")
+        result = service.export_pdf(
+            inv.id,
+            output_path=output,
+            company_name="Test Company LLC",
+            company_address="123 Main St, Anytown, USA",
+            company_email="billing@testcompany.com",
+        )
+        assert result == output
+        assert Path(output).exists()
+
+    def test_export_pdf_with_tax_and_discount(self, service, tmp_path):
+        service.add_client(name="Acme Corp")
+        inv = service.create_invoice(
+            client_identifier="Acme Corp",
+            line_items=[{"description": "Work", "unit_price": 100.0, "tax_rate": 10.0}],
+            discount_amount=15.0,
+        )
+        output = str(tmp_path / "test_tax_discount.pdf")
+        result = service.export_pdf(inv.id, output_path=output)
+        assert Path(output).exists()
+
+    def test_export_pdf_with_payments(self, service, tmp_path):
+        service.add_client(name="Acme Corp")
+        inv = service.create_invoice(
+            client_identifier="Acme Corp",
+            line_items=[{"description": "Work", "unit_price": 100.0}],
+        )
+        service.record_payment(inv.id, 40.0, method="credit_card", reference="TXN-001")
+        service.record_payment(inv.id, 60.0, method="bank_transfer", reference="TXN-002")
+
+        output = str(tmp_path / "test_payments.pdf")
+        result = service.export_pdf(inv.id, output_path=output)
+        assert Path(output).exists()
+
+    def test_export_pdf_not_found(self, service):
+        with pytest.raises(ValueError, match="not found"):
+            service.export_pdf("INV-9999")
+
+    def test_export_pdf_auto_path(self, service):
+        """Test PDF export with auto-generated path."""
+        service.add_client(name="Acme Corp")
+        inv = service.create_invoice(
+            client_identifier="Acme Corp",
+            line_items=[{"description": "Work", "unit_price": 100.0}],
+        )
+        result = service.export_pdf(inv.id)
+        assert result.endswith(".pdf")
+        assert Path(result).exists()
+        # Cleanup
+        Path(result).unlink(missing_ok=True)
 
 
 class TestRecurringInvoiceService:
@@ -541,3 +759,16 @@ class TestEarningsSummary:
         eur_summary = service.earnings_summary(currency="EUR")
         assert eur_summary.invoice_count == 1
         assert eur_summary.currency == "EUR"
+
+    def test_summary_with_partial_payments(self, service):
+        service.add_client(name="Acme")
+        inv = service.create_invoice(
+            client_identifier="Acme",
+            line_items=[{"description": "Work", "unit_price": 100.0}],
+        )
+        service.record_payment(inv.id, 60.0, method="credit_card")
+        summary = service.earnings_summary()
+        assert summary.partially_paid_count == 1
+        assert summary.total_payments == 60.0
+        assert summary.total_paid == 60.0  # amount actually paid
+        assert summary.total_pending == 40.0  # remaining amount

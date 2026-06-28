@@ -147,7 +147,7 @@ def invoice_create(client: str, item: tuple, due: int, notes: Optional[str], cur
 
 
 @main.command("list")
-@click.option("--status", "-s", type=click.Choice(["draft", "sent", "paid", "overdue", "cancelled"]), help="Filter by status")
+@click.option("--status", "-s", type=click.Choice(["draft", "sent", "paid", "overdue", "cancelled", "partially_paid"]), help="Filter by status")
 @click.option("--client", "-c", help="Filter by client ID or name")
 @click.option("--currency", help="Filter by currency code")
 def invoice_list(status: Optional[str], client: Optional[str], currency: Optional[str]):
@@ -168,6 +168,8 @@ def invoice_list(status: Optional[str], client: Optional[str], currency: Optiona
     table.add_column("Subtotal", justify="right")
     table.add_column("Tax", justify="right")
     table.add_column("Total", justify="right", style="green")
+    table.add_column("Paid", justify="right")
+    table.add_column("Remaining", justify="right")
     table.add_column("Due Date")
     for inv in invoices:
         status_style = {
@@ -176,6 +178,7 @@ def invoice_list(status: Optional[str], client: Optional[str], currency: Optiona
             "sent": "[yellow]SENT[/yellow]",
             "draft": "[dim]DRAFT[/dim]",
             "cancelled": "[dim]CANCELLED[/dim]",
+            "partially_paid": "[cyan]PARTIAL[/cyan]",
         }.get(inv.status.value, inv.status.value)
         sym = get_currency_symbol(inv.currency)
         table.add_row(
@@ -187,6 +190,8 @@ def invoice_list(status: Optional[str], client: Optional[str], currency: Optiona
             f"{sym}{inv.subtotal:.2f}",
             f"{sym}{inv.total_tax:.2f}" if inv.total_tax > 0 else "—",
             f"{sym}{inv.total:.2f}",
+            f"{sym}{inv.amount_paid:.2f}" if inv.amount_paid > 0 else "—",
+            f"{sym}{inv.amount_remaining:.2f}" if inv.amount_remaining > 0 and inv.amount_paid > 0 else "—",
             str(inv.due_date) if inv.due_date else "—",
         )
     console.print(table)
@@ -206,16 +211,77 @@ def invoice_show(invoice_id: str):
 
 @main.command("pay")
 @click.argument("invoice_id")
-def invoice_pay(invoice_id: str):
-    """Mark an invoice as paid."""
+@click.option("--amount", "-a", type=float, default=None, help="Partial payment amount (if not specified, marks as fully paid)")
+@click.option("--method", "-m", help="Payment method (e.g. bank_transfer, credit_card, crypto, cash)")
+@click.option("--reference", "-r", help="Payment reference / transaction ID")
+@click.option("--date", "payment_date", help="Payment date (YYYY-MM-DD, defaults to today)")
+def invoice_pay(invoice_id: str, amount: Optional[float], method: Optional[str], reference: Optional[str], payment_date: Optional[str]):
+    """Mark an invoice as paid, or record a partial payment."""
     svc = get_service()
-    try:
-        inv = svc.mark_paid(invoice_id)
-        sym = get_currency_symbol(inv.currency)
-        console.print(f"[green]✓[/green] Invoice {inv.id} marked as PAID ({sym}{inv.total:.2f})")
-    except ValueError as e:
-        console.print(f"[red]✗[/red] {e}")
+    inv = svc.get_invoice(invoice_id)
+    if not inv:
+        console.print(f"[red]✗[/red] Invoice not found: {invoice_id}")
         sys.exit(1)
+
+    if amount is not None:
+        # Partial payment
+        parsed_date = None
+        if payment_date:
+            from datetime import date as date_type
+            try:
+                parsed_date = date_type.fromisoformat(payment_date)
+            except ValueError:
+                console.print(f"[red]✗[/red] Invalid date format: {payment_date}. Use YYYY-MM-DD.")
+                sys.exit(1)
+        try:
+            inv = svc.record_payment(
+                invoice_id=invoice_id,
+                amount=amount,
+                method=method,
+                reference=reference,
+                payment_date=parsed_date,
+            )
+            sym = get_currency_symbol(inv.currency)
+            console.print(f"[green]✓[/green] Payment of {sym}{amount:.2f} recorded for {inv.id}")
+            console.print(f"  Status:    {inv.status.value.replace('_', ' ').upper()}")
+            console.print(f"  Paid:      {sym}{inv.amount_paid:.2f}")
+            console.print(f"  Remaining: {sym}{inv.amount_remaining:.2f}")
+        except ValueError as e:
+            console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
+    else:
+        # Full payment (legacy behavior)
+        if method or reference:
+            # If method/reference provided, record a payment for the full amount
+            parsed_date = None
+            if payment_date:
+                from datetime import date as date_type
+                try:
+                    parsed_date = date_type.fromisoformat(payment_date)
+                except ValueError:
+                    console.print(f"[red]✗[/red] Invalid date format: {payment_date}. Use YYYY-MM-DD.")
+                    sys.exit(1)
+            try:
+                inv = svc.record_payment(
+                    invoice_id=invoice_id,
+                    amount=inv.amount_remaining,
+                    method=method,
+                    reference=reference,
+                    payment_date=parsed_date,
+                )
+                sym = get_currency_symbol(inv.currency)
+                console.print(f"[green]✓[/green] Invoice {inv.id} marked as PAID ({sym}{inv.total:.2f})")
+            except ValueError as e:
+                console.print(f"[red]✗[/red] {e}")
+                sys.exit(1)
+        else:
+            try:
+                inv = svc.mark_paid(invoice_id)
+                sym = get_currency_symbol(inv.currency)
+                console.print(f"[green]✓[/green] Invoice {inv.id} marked as PAID ({sym}{inv.total:.2f})")
+            except ValueError as e:
+                console.print(f"[red]✗[/red] {e}")
+                sys.exit(1)
 
 
 @main.command("send")
@@ -262,8 +328,12 @@ def invoice_discount(invoice_id: str, amount: float):
 
 @main.command("export")
 @click.argument("invoice_id")
-@click.option("--format", "-f", type=click.Choice(["markdown", "json"]), default="markdown", help="Export format")
-def invoice_export(invoice_id: str, format: str):
+@click.option("--format", "-f", type=click.Choice(["markdown", "json", "pdf"]), default="markdown", help="Export format")
+@click.option("--output", "-o", help="Output file path (for PDF)")
+@click.option("--company", help="Company name for PDF header")
+@click.option("--company-address", help="Company address for PDF")
+@click.option("--company-email", help="Company email for PDF")
+def invoice_export(invoice_id: str, format: str, output: Optional[str], company: Optional[str], company_address: Optional[str], company_email: Optional[str]):
     """Export an invoice."""
     svc = get_service()
     inv = svc.get_invoice(invoice_id)
@@ -272,8 +342,21 @@ def invoice_export(invoice_id: str, format: str):
         sys.exit(1)
     if format == "markdown":
         console.print(inv.to_markdown())
-    else:
+    elif format == "json":
         console.print(inv.model_dump_json(indent=2))
+    elif format == "pdf":
+        try:
+            pdf_path = svc.export_pdf(
+                invoice_id=invoice_id,
+                output_path=output,
+                company_name=company,
+                company_address=company_address,
+                company_email=company_email,
+            )
+            console.print(f"[green]✓[/green] PDF exported: {pdf_path}")
+        except ValueError as e:
+            console.print(f"[red]✗[/red] {e}")
+            sys.exit(1)
 
 
 @main.command("earnings")
@@ -292,7 +375,76 @@ def invoice_earnings(currency: Optional[str]):
         console.print(f"  Total Tax:       [dim]{sym}{summary.total_tax:.2f}[/dim]")
     if summary.total_discounts > 0:
         console.print(f"  Total Discounts: [dim]{sym}{summary.total_discounts:.2f}[/dim]")
-    console.print(f"\n  Invoices: {summary.invoice_count}  |  Paid: {summary.paid_count}  |  Pending: {summary.pending_count}  |  Overdue: {summary.overdue_count}")
+    if summary.total_payments > 0:
+        console.print(f"  Total Payments:  [dim]{sym}{summary.total_payments:.2f}[/dim]")
+    parts = [f"Invoices: {summary.invoice_count}", f"Paid: {summary.paid_count}", f"Pending: {summary.pending_count}", f"Overdue: {summary.overdue_count}"]
+    if summary.partially_paid_count > 0:
+        parts.append(f"Partial: {summary.partially_paid_count}")
+    console.print(f"\n  {'  |  '.join(parts)}")
+
+
+# --- Payment commands ---
+
+@main.group("payments")
+def payments():
+    """Manage invoice payments."""
+    pass
+
+
+@payments.command("list")
+@click.argument("invoice_id")
+def payments_list(invoice_id: str):
+    """List all payments for an invoice."""
+    svc = get_service()
+    try:
+        pay_list = svc.list_payments(invoice_id)
+        if not pay_list:
+            console.print("[dim]No payments found for this invoice.[/dim]")
+            return
+
+        inv = svc.get_invoice(invoice_id)
+        sym = get_currency_symbol(inv.currency) if inv else "$"
+
+        table = Table(title=f"Payments for {invoice_id}")
+        table.add_column("ID", style="cyan")
+        table.add_column("Date")
+        table.add_column("Amount", justify="right", style="green")
+        table.add_column("Method")
+        table.add_column("Reference")
+        table.add_column("Notes")
+        for p in pay_list:
+            table.add_row(
+                p.id,
+                str(p.payment_date),
+                f"{sym}{p.amount:.2f}",
+                p.method or "—",
+                p.reference or "—",
+                p.notes or "—",
+            )
+        console.print(table)
+        if inv:
+            console.print(f"  Total: {sym}{inv.total:.2f}  |  Paid: {sym}{inv.amount_paid:.2f}  |  Remaining: {sym}{inv.amount_remaining:.2f}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@payments.command("remove")
+@click.argument("invoice_id")
+@click.argument("payment_id")
+def payments_remove(invoice_id: str, payment_id: str):
+    """Remove a payment from an invoice."""
+    svc = get_service()
+    try:
+        inv = svc.remove_payment(invoice_id, payment_id)
+        sym = get_currency_symbol(inv.currency)
+        console.print(f"[green]✓[/green] Payment {payment_id} removed from {invoice_id}")
+        console.print(f"  Status:    {inv.status.value.replace('_', ' ').upper()}")
+        console.print(f"  Paid:      {sym}{inv.amount_paid:.2f}")
+        console.print(f"  Remaining: {sym}{inv.amount_remaining:.2f}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
 
 
 # --- Recurring invoice commands ---

@@ -16,6 +16,7 @@ class InvoiceStatus(str, Enum):
     PAID = "paid"
     OVERDUE = "overdue"
     CANCELLED = "cancelled"
+    PARTIALLY_PAID = "partially_paid"
 
 
 class RecurrenceFrequency(str, Enum):
@@ -60,6 +61,18 @@ def format_amount(amount: float, currency: str = "USD") -> str:
     return f"{symbol}{amount:,.{decimals}f}"
 
 
+class Payment(BaseModel):
+    """A payment applied to an invoice."""
+
+    id: str = Field(default_factory=lambda: f"PMT-{uuid.uuid4().hex[:6].upper()}")
+    amount: float
+    method: Optional[str] = None  # e.g. "bank_transfer", "credit_card", "crypto", "cash"
+    reference: Optional[str] = None  # External payment reference / transaction ID
+    notes: Optional[str] = None
+    payment_date: date = Field(default_factory=date.today)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
 class LineItem(BaseModel):
     """A single line item on an invoice."""
 
@@ -99,6 +112,7 @@ class Invoice(BaseModel):
     client_id: str
     client_name: Optional[str] = None
     line_items: list[LineItem] = []
+    payments: list[Payment] = []
     status: InvoiceStatus = InvoiceStatus.DRAFT
     issue_date: date = Field(default_factory=date.today)
     due_date: Optional[date] = None
@@ -125,6 +139,16 @@ class Invoice(BaseModel):
         return round(self.subtotal + self.total_tax - self.discount_amount, 2)
 
     @property
+    def amount_paid(self) -> float:
+        """Total amount paid across all payments."""
+        return round(sum(p.amount for p in self.payments), 2)
+
+    @property
+    def amount_remaining(self) -> float:
+        """Amount still owed on this invoice."""
+        return round(self.total - self.amount_paid, 2)
+
+    @property
     def is_overdue(self) -> bool:
         if self.due_date and self.status not in (InvoiceStatus.PAID, InvoiceStatus.CANCELLED):
             return date.today() > self.due_date
@@ -132,6 +156,36 @@ class Invoice(BaseModel):
 
     def set_due_date(self, days: int) -> None:
         self.due_date = date.today() + timedelta(days=days)
+
+    def add_payment(self, payment: Payment) -> None:
+        """Add a payment and update invoice status accordingly."""
+        self.payments.append(payment)
+        self.updated_at = datetime.now(tz=timezone.utc)
+        # Update status based on payment
+        if self.amount_remaining <= 0:
+            self.status = InvoiceStatus.PAID
+            self.paid_date = date.today()
+        elif self.amount_paid > 0:
+            self.status = InvoiceStatus.PARTIALLY_PAID
+
+    def remove_payment(self, payment_id: str) -> bool:
+        """Remove a payment by ID. Returns True if found and removed."""
+        for i, p in enumerate(self.payments):
+            if p.id == payment_id:
+                self.payments.pop(i)
+                self.updated_at = datetime.now(tz=timezone.utc)
+                # Recalculate status
+                if self.amount_paid == 0:
+                    self.status = InvoiceStatus.DRAFT
+                    self.paid_date = None
+                elif self.amount_remaining <= 0:
+                    self.status = InvoiceStatus.PAID
+                    self.paid_date = date.today()
+                else:
+                    self.status = InvoiceStatus.PARTIALLY_PAID
+                    self.paid_date = None
+                return True
+        return False
 
     def mark_paid(self) -> None:
         self.status = InvoiceStatus.PAID
@@ -143,7 +197,7 @@ class Invoice(BaseModel):
         self.updated_at = datetime.now(tz=timezone.utc)
 
     def check_overdue(self) -> None:
-        if self.is_overdue and self.status == InvoiceStatus.SENT:
+        if self.is_overdue and self.status in (InvoiceStatus.SENT, InvoiceStatus.PARTIALLY_PAID):
             self.status = InvoiceStatus.OVERDUE
             self.updated_at = datetime.now(tz=timezone.utc)
 
@@ -177,6 +231,22 @@ class Invoice(BaseModel):
         if self.discount_amount > 0:
             lines.append(f"**Discount: -{sym}{self.discount_amount:.2f}**")
         lines.append(f"**Total: {sym}{self.total:.2f}**")
+
+        # Payments section
+        if self.payments:
+            lines.append("")
+            lines.append("## Payments")
+            lines.append("")
+            lines.append("| Date | Amount | Method | Reference |")
+            lines.append("|---|---|---|---|")
+            for p in self.payments:
+                method = p.method or "—"
+                ref = p.reference or "—"
+                lines.append(f"| {p.payment_date} | {sym}{p.amount:.2f} | {method} | {ref} |")
+            lines.append("")
+            lines.append(f"**Amount Paid: {sym}{self.amount_paid:.2f}**")
+            lines.append(f"**Amount Remaining: {sym}{self.amount_remaining:.2f}**")
+
         if self.notes:
             lines.append("")
             lines.append(f"**Notes:** {self.notes}")
@@ -281,8 +351,10 @@ class EarningsSummary(BaseModel):
     total_overdue: float = 0.0
     total_tax: float = 0.0
     total_discounts: float = 0.0
+    total_payments: float = 0.0
     invoice_count: int = 0
     paid_count: int = 0
     pending_count: int = 0
     overdue_count: int = 0
+    partially_paid_count: int = 0
     currency: str = "USD"

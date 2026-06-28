@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-invoice"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server + CLI for autonomous agents to generate, track, and manage invoices"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "Nyx Builds", email = "nyx-builds@users.noreply.github.com" }]
-keywords = ["invoice", "mcp", "agent", "billing", "payments"]
+keywords = ["invoice", "mcp", "agent", "billing", "payments", "pdf"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -26,6 +26,7 @@ dependencies = [
     "mcp>=1.0",
     "rich>=13.0",
     "click>=8.0",
+    "reportlab>=4.0",
 ]
 
 [project.optional-dependencies]

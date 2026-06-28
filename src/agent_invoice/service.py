@@ -13,6 +13,7 @@ from .models import (
     InvoiceStatus,
     LineItem,
     NumberingConfig,
+    Payment,
     RecurrenceFrequency,
     RecurringInvoice,
     format_amount,
@@ -204,6 +205,111 @@ class InvoiceService:
         invoice.updated_at = datetime.now(tz=timezone.utc)
         return self.store.save_invoice(invoice)
 
+    # --- Payment operations ---
+
+    def record_payment(
+        self,
+        invoice_id: str,
+        amount: float,
+        method: Optional[str] = None,
+        reference: Optional[str] = None,
+        notes: Optional[str] = None,
+        payment_date: Optional[date] = None,
+    ) -> Invoice:
+        """Record a payment against an invoice.
+
+        Args:
+            invoice_id: The invoice to apply the payment to.
+            amount: Payment amount.
+            method: Payment method (e.g. "bank_transfer", "credit_card", "crypto", "cash").
+            reference: External payment reference / transaction ID.
+            notes: Payment notes.
+            payment_date: Date of payment (defaults to today).
+
+        Returns:
+            The updated invoice.
+        """
+        invoice = self.store.get_invoice(invoice_id)
+        if not invoice:
+            raise ValueError(f"Invoice '{invoice_id}' not found.")
+        if invoice.status == InvoiceStatus.CANCELLED:
+            raise ValueError("Cannot record payment against a cancelled invoice.")
+        if invoice.status == InvoiceStatus.PAID:
+            raise ValueError(f"Invoice '{invoice_id}' is already fully paid.")
+
+        amount = round(amount, 2)
+        if amount <= 0:
+            raise ValueError("Payment amount must be positive.")
+
+        # Check for overpayment
+        remaining = invoice.amount_remaining
+        if amount > remaining + 0.01:  # Small tolerance for rounding
+            raise ValueError(
+                f"Payment amount ({amount}) exceeds remaining balance ({remaining}). "
+                f"Use amount {remaining} or less."
+            )
+
+        payment = Payment(
+            amount=amount,
+            method=method,
+            reference=reference,
+            notes=notes,
+            payment_date=payment_date or date.today(),
+        )
+        invoice.add_payment(payment)
+        return self.store.save_invoice(invoice)
+
+    def list_payments(self, invoice_id: str) -> list[Payment]:
+        """List all payments for an invoice."""
+        invoice = self.store.get_invoice(invoice_id)
+        if not invoice:
+            raise ValueError(f"Invoice '{invoice_id}' not found.")
+        return invoice.payments
+
+    def remove_payment(self, invoice_id: str, payment_id: str) -> Invoice:
+        """Remove a payment from an invoice."""
+        invoice = self.store.get_invoice(invoice_id)
+        if not invoice:
+            raise ValueError(f"Invoice '{invoice_id}' not found.")
+        if not invoice.remove_payment(payment_id):
+            raise ValueError(f"Payment '{payment_id}' not found on invoice '{invoice_id}'.")
+        return self.store.save_invoice(invoice)
+
+    # --- PDF Export ---
+
+    def export_pdf(
+        self,
+        invoice_id: str,
+        output_path: Optional[str] = None,
+        company_name: Optional[str] = None,
+        company_address: Optional[str] = None,
+        company_email: Optional[str] = None,
+    ) -> str:
+        """Export an invoice as a PDF file.
+
+        Args:
+            invoice_id: The invoice ID to export.
+            output_path: Path to save the PDF. Auto-generated if None.
+            company_name: Your company name for the header.
+            company_address: Your company address.
+            company_email: Your company email.
+
+        Returns:
+            The path to the generated PDF file.
+        """
+        invoice = self.store.get_invoice(invoice_id)
+        if not invoice:
+            raise ValueError(f"Invoice '{invoice_id}' not found.")
+
+        from .pdf import generate_pdf
+        return generate_pdf(
+            invoice=invoice,
+            output_path=output_path,
+            company_name=company_name,
+            company_address=company_address,
+            company_email=company_email,
+        )
+
     # --- Recurring invoice operations ---
 
     def create_recurring(
@@ -321,9 +427,15 @@ class InvoiceService:
             summary.total_invoiced += subtotal
             summary.total_tax += inv.total_tax
             summary.total_discounts += inv.discount_amount
+            summary.total_payments += inv.amount_paid
             if inv.status == InvoiceStatus.PAID:
                 summary.total_paid += inv.total  # Use grand total for paid
                 summary.paid_count += 1
+            elif inv.status == InvoiceStatus.PARTIALLY_PAID:
+                summary.total_paid += inv.amount_paid
+                summary.partially_paid_count += 1
+                summary.total_pending += inv.amount_remaining
+                summary.pending_count += 1
             elif inv.status == InvoiceStatus.OVERDUE:
                 summary.total_overdue += subtotal
                 summary.overdue_count += 1
@@ -338,4 +450,5 @@ class InvoiceService:
         summary.total_overdue = round(summary.total_overdue, 2)
         summary.total_tax = round(summary.total_tax, 2)
         summary.total_discounts = round(summary.total_discounts, 2)
+        summary.total_payments = round(summary.total_payments, 2)
         return summary

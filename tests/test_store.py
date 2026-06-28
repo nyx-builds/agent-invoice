@@ -5,9 +5,8 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from agent_invoice.models import Client, Invoice, InvoiceStatus, LineItem, NumberingConfig, RecurringInvoice, RecurrenceFrequency
+from agent_invoice.models import Client, Invoice, InvoiceStatus, LineItem, NumberingConfig, Payment, RecurringInvoice, RecurrenceFrequency
 from agent_invoice.store import InvoiceStore
-
 
 @pytest.fixture
 def store(tmp_path):
@@ -140,6 +139,39 @@ class TestInvoiceStorage:
         retrieved = store.get_invoice("INV-0001")
         assert retrieved.currency == "EUR"
 
+    def test_save_and_get_invoice_with_payments(self, store):
+        inv = Invoice(
+            id="INV-0001",
+            client_id="CLT-123",
+            client_name="Test",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=50.0, method="bank_transfer", reference="TXN-001"))
+        store.save_invoice(inv)
+        retrieved = store.get_invoice("INV-0001")
+        assert retrieved is not None
+        assert len(retrieved.payments) == 1
+        assert retrieved.payments[0].amount == 50.0
+        assert retrieved.payments[0].method == "bank_transfer"
+        assert retrieved.payments[0].reference == "TXN-001"
+        assert retrieved.amount_paid == 50.0
+        assert retrieved.amount_remaining == 50.0
+        assert retrieved.status == InvoiceStatus.PARTIALLY_PAID
+
+    def test_save_invoice_multiple_payments(self, store):
+        inv = Invoice(
+            id="INV-0001",
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=30.0, method="credit_card"))
+        inv.add_payment(Payment(amount=70.0, method="bank_transfer"))
+        store.save_invoice(inv)
+        retrieved = store.get_invoice("INV-0001")
+        assert len(retrieved.payments) == 2
+        assert retrieved.amount_paid == 100.0
+        assert retrieved.status == InvoiceStatus.PAID
+
     def test_get_nonexistent_invoice(self, store):
         assert store.get_invoice("INV-NONEXIST") is None
 
@@ -172,6 +204,15 @@ class TestInvoiceStorage:
         usd = store.list_invoices(currency="USD")
         assert len(usd) == 1
         assert usd[0].currency == "USD"
+
+    def test_list_invoices_filter_partially_paid(self, store):
+        inv1 = Invoice(id="INV-0001", client_id="CLT-1", status=InvoiceStatus.PARTIALLY_PAID)
+        inv2 = Invoice(id="INV-0002", client_id="CLT-1", status=InvoiceStatus.DRAFT)
+        store.save_invoice(inv1)
+        store.save_invoice(inv2)
+        partial = store.list_invoices(status=InvoiceStatus.PARTIALLY_PAID)
+        assert len(partial) == 1
+        assert partial[0].id == "INV-0001"
 
     def test_delete_invoice(self, store):
         inv = Invoice(id="INV-0001", client_id="CLT-1")

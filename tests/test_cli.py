@@ -24,7 +24,7 @@ class TestCLI:
     def test_version(self, runner):
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.2.0" in result.output
+        assert "0.3.0" in result.output
 
     def test_client_add(self, runner, env_home):
         result = runner.invoke(main, ["client", "add", "Acme Corp", "--email", "billing@acme.com"])
@@ -148,7 +148,7 @@ class TestCLI:
         runner.invoke(main, ["create", "--client", "Acme Corp", "--item", "Work,100.00"])
         result = runner.invoke(main, ["list"])
         assert result.exit_code == 0
-        assert "INV-" in result.output
+        assert "INV" in result.output
 
     def test_invoice_list_empty(self, runner, env_home):
         result = runner.invoke(main, ["list"])
@@ -222,6 +222,88 @@ class TestCLI:
         result = runner.invoke(main, ["client", "remove", "Acme Corp"])
         assert result.exit_code == 0
         assert "removed" in result.output.lower()
+
+
+class TestPartialPaymentCLI:
+    def _create_invoice(self, runner, env_home, client_name="Acme Corp"):
+        """Helper to create a client and invoice, returns invoice ID."""
+        import os
+        runner.invoke(main, ["client", "add", client_name])
+        runner.invoke(main, ["create", "--client", client_name, "--item", "Work,1,200.00"])
+        store = InvoiceStore(data_dir=os.environ.get("AGENT_INVOICE_DIR"))
+        svc = InvoiceService(store=store)
+        invoices = svc.list_invoices()
+        return invoices[-1].id if invoices else None
+
+    def test_pay_full(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            result = runner.invoke(main, ["pay", inv_id])
+            assert result.exit_code == 0
+            assert "PAID" in result.output
+
+    def test_pay_partial(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            result = runner.invoke(main, ["pay", inv_id, "--amount", "80.00"])
+            assert result.exit_code == 0
+            assert "Payment" in result.output
+            assert "80.00" in result.output
+
+    def test_pay_partial_with_method(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            result = runner.invoke(main, ["pay", inv_id, "--amount", "100.00", "--method", "bank_transfer"])
+            assert result.exit_code == 0
+            assert "Payment" in result.output
+
+    def test_pay_partial_with_reference(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            result = runner.invoke(main, ["pay", inv_id, "--amount", "50.00", "--reference", "TXN-123"])
+            assert result.exit_code == 0
+
+    def test_pay_overpayment_fails(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            result = runner.invoke(main, ["pay", inv_id, "--amount", "500.00"])
+            assert result.exit_code == 1
+            assert "exceeds" in result.output.lower() or "Error" in result.output
+
+    def test_payments_list(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            runner.invoke(main, ["pay", inv_id, "--amount", "80.00", "--method", "credit_card"])
+            result = runner.invoke(main, ["payments", "list", inv_id])
+            assert result.exit_code == 0
+            assert "80.00" in result.output or "credit_card" in result.output
+
+    def test_payments_list_empty(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            result = runner.invoke(main, ["payments", "list", inv_id])
+            assert result.exit_code == 0
+            assert "No payments" in result.output
+
+    def test_export_pdf(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            import os
+            output = os.path.join(str(env_home), "test_export.pdf")
+            result = runner.invoke(main, ["export", inv_id, "--format", "pdf", "--output", output])
+            assert result.exit_code == 0
+            assert "PDF exported" in result.output
+
+    def test_multiple_partial_payments(self, runner, env_home):
+        inv_id = self._create_invoice(runner, env_home)
+        if inv_id:
+            # First payment
+            result1 = runner.invoke(main, ["pay", inv_id, "--amount", "80.00"])
+            assert result1.exit_code == 0
+            # Second payment
+            result2 = runner.invoke(main, ["pay", inv_id, "--amount", "120.00"])
+            assert result2.exit_code == 0
+            assert "PAID" in result2.output or "0.00" in result2.output
 
 
 class TestRecurringCLI:

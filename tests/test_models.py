@@ -11,6 +11,7 @@ from agent_invoice.models import (
     InvoiceStatus,
     LineItem,
     NumberingConfig,
+    Payment,
     RecurrenceFrequency,
     RecurringInvoice,
     format_amount,
@@ -66,6 +67,37 @@ class TestLineItem:
         assert item.tax_amount == 12.0  # explicit override
 
 
+class TestPayment:
+    def test_create_payment(self):
+        p = Payment(amount=100.0)
+        assert p.id.startswith("PMT-")
+        assert p.amount == 100.0
+        assert p.method is None
+        assert p.reference is None
+        assert p.payment_date == date.today()
+
+    def test_payment_with_details(self):
+        p = Payment(
+            amount=500.0,
+            method="bank_transfer",
+            reference="TXN-12345",
+            notes="First installment",
+        )
+        assert p.amount == 500.0
+        assert p.method == "bank_transfer"
+        assert p.reference == "TXN-12345"
+        assert p.notes == "First installment"
+
+    def test_payment_custom_date(self):
+        p = Payment(amount=200.0, payment_date=date(2026, 1, 15))
+        assert p.payment_date == date(2026, 1, 15)
+
+    def test_payment_methods(self):
+        for method in ["bank_transfer", "credit_card", "crypto", "cash", "check"]:
+            p = Payment(amount=100.0, method=method)
+            assert p.method == method
+
+
 class TestClient:
     def test_create_client(self):
         client = Client(name="Acme Corp", email="billing@acme.com")
@@ -93,6 +125,7 @@ class TestInvoice:
         assert inv.id.startswith("INV-")
         assert inv.status == InvoiceStatus.DRAFT
         assert inv.subtotal == 0.0
+        assert inv.payments == []
 
     def test_subtotal_with_items(self):
         inv = Invoice(
@@ -221,6 +254,23 @@ class TestInvoice:
         md = inv.to_markdown()
         assert "€500.00" in md
 
+    def test_to_markdown_with_payments(self):
+        inv = Invoice(
+            id="INV-0001",
+            client_id="CLT-123",
+            client_name="Acme Corp",
+            currency="USD",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=50.0, method="bank_transfer", reference="TXN-001"))
+        md = inv.to_markdown()
+        assert "Payments" in md
+        assert "bank_transfer" in md
+        assert "TXN-001" in md
+        assert "$50.00" in md
+        assert "Amount Paid" in md
+        assert "Amount Remaining" in md
+
     def test_cancel_invoice(self):
         inv = Invoice(client_id="CLT-123", status=InvoiceStatus.DRAFT)
         inv.status = InvoiceStatus.CANCELLED
@@ -233,6 +283,121 @@ class TestInvoice:
     def test_custom_currency(self):
         inv = Invoice(client_id="CLT-123", currency="EUR")
         assert inv.currency == "EUR"
+
+
+class TestPartialPayments:
+    def test_amount_paid_no_payments(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        assert inv.amount_paid == 0.0
+        assert inv.amount_remaining == 100.0
+
+    def test_add_payment_partial(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=40.0, method="bank_transfer"))
+        assert inv.amount_paid == 40.0
+        assert inv.amount_remaining == 60.0
+        assert inv.status == InvoiceStatus.PARTIALLY_PAID
+
+    def test_add_payment_full(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=100.0))
+        assert inv.amount_paid == 100.0
+        assert inv.amount_remaining == 0.0
+        assert inv.status == InvoiceStatus.PAID
+        assert inv.paid_date == date.today()
+
+    def test_add_multiple_payments(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=30.0, method="credit_card"))
+        inv.add_payment(Payment(amount=30.0, method="bank_transfer"))
+        inv.add_payment(Payment(amount=40.0, method="cash"))
+        assert inv.amount_paid == 100.0
+        assert inv.amount_remaining == 0.0
+        assert inv.status == InvoiceStatus.PAID
+        assert len(inv.payments) == 3
+
+    def test_add_payment_with_tax_and_discount(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0, tax_rate=10.0)],
+            discount_amount=10.0,
+        )
+        # total = 100 + 10 - 10 = 100
+        inv.add_payment(Payment(amount=50.0))
+        assert inv.amount_remaining == 50.0
+        assert inv.status == InvoiceStatus.PARTIALLY_PAID
+
+    def test_remove_payment(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=60.0))
+        inv.add_payment(Payment(amount=40.0))
+        assert inv.status == InvoiceStatus.PAID
+
+        # Remove the second payment
+        payment_id = inv.payments[1].id
+        result = inv.remove_payment(payment_id)
+        assert result is True
+        assert inv.amount_paid == 60.0
+        assert inv.amount_remaining == 40.0
+        assert inv.status == InvoiceStatus.PARTIALLY_PAID
+        assert inv.paid_date is None
+
+    def test_remove_only_payment(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=50.0))
+        assert inv.status == InvoiceStatus.PARTIALLY_PAID
+
+        payment_id = inv.payments[0].id
+        inv.remove_payment(payment_id)
+        assert inv.amount_paid == 0.0
+        assert inv.amount_remaining == 100.0
+        assert inv.status == InvoiceStatus.DRAFT
+
+    def test_remove_nonexistent_payment(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=50.0))
+        assert inv.remove_payment("PMT-NONEXIST") is False
+
+    def test_partial_payment_preserves_sent_status(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            status=InvoiceStatus.SENT,
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.add_payment(Payment(amount=50.0))
+        # Should be partially_paid, not sent
+        assert inv.status == InvoiceStatus.PARTIALLY_PAID
+
+    def test_partial_payment_overdue_check(self):
+        inv = Invoice(
+            client_id="CLT-123",
+            status=InvoiceStatus.PARTIALLY_PAID,
+            line_items=[LineItem(description="Work", quantity=1, unit_price=100.0)],
+        )
+        inv.due_date = date.today() - timedelta(days=1)
+        inv.check_overdue()
+        assert inv.status == InvoiceStatus.OVERDUE
 
 
 class TestRecurringInvoice:
@@ -348,6 +513,8 @@ class TestEarningsSummary:
         assert summary.invoice_count == 0
         assert summary.total_tax == 0.0
         assert summary.currency == "USD"
+        assert summary.partially_paid_count == 0
+        assert summary.total_payments == 0.0
 
     def test_summary_with_currency(self):
         summary = EarningsSummary(currency="EUR")

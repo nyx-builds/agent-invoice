@@ -80,7 +80,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["draft", "sent", "paid", "overdue", "cancelled"],
+                        "enum": ["draft", "sent", "paid", "overdue", "cancelled", "partially_paid"],
                         "description": "Filter by invoice status",
                     },
                     "client": {
@@ -96,7 +96,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_invoice",
-            description="Get full details of a specific invoice by ID, including tax, discounts, and totals.",
+            description="Get full details of a specific invoice by ID, including tax, discounts, payments, and totals.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -110,7 +110,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="mark_paid",
-            description="Mark an invoice as paid.",
+            description="Mark an invoice as fully paid. For partial payments, use record_payment instead.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -169,6 +169,72 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="record_payment",
+            description="Record a payment against an invoice. Supports partial payments. If the payment covers the full remaining balance, the invoice is automatically marked as paid.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The invoice ID to record the payment against",
+                    },
+                    "amount": {
+                        "type": "number",
+                        "description": "Payment amount",
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "Payment method (e.g. bank_transfer, credit_card, crypto, cash)",
+                    },
+                    "reference": {
+                        "type": "string",
+                        "description": "External payment reference or transaction ID",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Payment notes",
+                    },
+                    "payment_date": {
+                        "type": "string",
+                        "description": "Payment date in YYYY-MM-DD format (defaults to today)",
+                    },
+                },
+                "required": ["invoice_id", "amount"],
+            },
+        ),
+        Tool(
+            name="list_payments",
+            description="List all payments recorded against an invoice.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The invoice ID",
+                    },
+                },
+                "required": ["invoice_id"],
+            },
+        ),
+        Tool(
+            name="remove_payment",
+            description="Remove a payment from an invoice. The invoice status will be recalculated.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The invoice ID",
+                    },
+                    "payment_id": {
+                        "type": "string",
+                        "description": "The payment ID to remove",
+                    },
+                },
+                "required": ["invoice_id", "payment_id"],
+            },
+        ),
+        Tool(
             name="add_client",
             description="Register a new client that can be billed. Supports default currency.",
             inputSchema={
@@ -217,13 +283,35 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="export_invoice",
-            description="Export an invoice as markdown text.",
+            description="Export an invoice as markdown text, JSON, or PDF. PDF export returns the file path.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "invoice_id": {
                         "type": "string",
                         "description": "The invoice ID to export",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["markdown", "json", "pdf"],
+                        "description": "Export format (default: markdown)",
+                        "default": "markdown",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (for PDF). Auto-generated if not specified.",
+                    },
+                    "company_name": {
+                        "type": "string",
+                        "description": "Company name for PDF header",
+                    },
+                    "company_address": {
+                        "type": "string",
+                        "description": "Company address for PDF",
+                    },
+                    "company_email": {
+                        "type": "string",
+                        "description": "Company email for PDF",
                     },
                 },
                 "required": ["invoice_id"],
@@ -428,6 +516,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 "subtotal": inv.subtotal,
                 "tax": inv.total_tax,
                 "total": inv.total,
+                "amount_paid": inv.amount_paid,
+                "amount_remaining": inv.amount_remaining,
                 "due_date": str(inv.due_date) if inv.due_date else None,
             })
         return _json_result(result)
@@ -436,7 +526,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         inv = svc.get_invoice(arguments["invoice_id"])
         if not inv:
             return _text_result(f"Invoice not found: {arguments['invoice_id']}")
-        return _json_result(inv.model_dump(mode="json"))
+        data = inv.model_dump(mode="json")
+        # Add computed fields
+        data["amount_paid"] = inv.amount_paid
+        data["amount_remaining"] = inv.amount_remaining
+        return _json_result(data)
 
     elif name == "mark_paid":
         try:
@@ -466,6 +560,64 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         except ValueError as e:
             return _text_result(f"Error: {e}")
 
+    elif name == "record_payment":
+        try:
+            from datetime import date as date_type
+            payment_date = None
+            if "payment_date" in arguments:
+                try:
+                    payment_date = date_type.fromisoformat(arguments["payment_date"])
+                except ValueError:
+                    return _text_result(f"Error: Invalid date format: {arguments['payment_date']}. Use YYYY-MM-DD.")
+            inv = svc.record_payment(
+                invoice_id=arguments["invoice_id"],
+                amount=arguments["amount"],
+                method=arguments.get("method"),
+                reference=arguments.get("reference"),
+                notes=arguments.get("notes"),
+                payment_date=payment_date,
+            )
+            return _json_result({
+                "id": inv.id,
+                "status": inv.status.value,
+                "amount_paid": inv.amount_paid,
+                "amount_remaining": inv.amount_remaining,
+                "total": inv.total,
+                "currency": inv.currency,
+                "payment_count": len(inv.payments),
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_payments":
+        try:
+            payments = svc.list_payments(arguments["invoice_id"])
+            result = []
+            for p in payments:
+                result.append({
+                    "id": p.id,
+                    "amount": p.amount,
+                    "method": p.method,
+                    "reference": p.reference,
+                    "notes": p.notes,
+                    "date": str(p.payment_date),
+                })
+            return _json_result(result)
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_payment":
+        try:
+            inv = svc.remove_payment(arguments["invoice_id"], arguments["payment_id"])
+            return _json_result({
+                "id": inv.id,
+                "status": inv.status.value,
+                "amount_paid": inv.amount_paid,
+                "amount_remaining": inv.amount_remaining,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
     elif name == "add_client":
         try:
             c = svc.add_client(
@@ -490,7 +642,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         inv = svc.get_invoice(arguments["invoice_id"])
         if not inv:
             return _text_result(f"Invoice not found: {arguments['invoice_id']}")
-        return _text_result(inv.to_markdown())
+        fmt = arguments.get("format", "markdown")
+        if fmt == "markdown":
+            return _text_result(inv.to_markdown())
+        elif fmt == "json":
+            return _text_result(inv.model_dump_json(indent=2))
+        elif fmt == "pdf":
+            try:
+                pdf_path = svc.export_pdf(
+                    invoice_id=arguments["invoice_id"],
+                    output_path=arguments.get("output_path"),
+                    company_name=arguments.get("company_name"),
+                    company_address=arguments.get("company_address"),
+                    company_email=arguments.get("company_email"),
+                )
+                return _json_result({"path": pdf_path, "format": "pdf"})
+            except ValueError as e:
+                return _text_result(f"Error: {e}")
 
     elif name == "create_recurring":
         try:
@@ -608,8 +776,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             })
         return _json_result(result)
 
-    else:
-        return _text_result(f"Unknown tool: {name}")
+    return _text_result(f"Unknown tool: {name}")
 
 
 async def main() -> None:
