@@ -18,17 +18,67 @@ class InvoiceStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class RecurrenceFrequency(str, Enum):
+    WEEKLY = "weekly"
+    BIWEEKLY = "biweekly"
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+
+# Currency definitions with symbol and decimal places
+CURRENCIES: dict[str, dict] = {
+    "USD": {"symbol": "$", "name": "US Dollar", "decimals": 2},
+    "EUR": {"symbol": "€", "name": "Euro", "decimals": 2},
+    "GBP": {"symbol": "£", "name": "British Pound", "decimals": 2},
+    "JPY": {"symbol": "¥", "name": "Japanese Yen", "decimals": 0},
+    "CAD": {"symbol": "C$", "name": "Canadian Dollar", "decimals": 2},
+    "AUD": {"symbol": "A$", "name": "Australian Dollar", "decimals": 2},
+    "CHF": {"symbol": "CHF", "name": "Swiss Franc", "decimals": 2},
+    "CNY": {"symbol": "¥", "name": "Chinese Yuan", "decimals": 2},
+    "INR": {"symbol": "₹", "name": "Indian Rupee", "decimals": 2},
+    "BRL": {"symbol": "R$", "name": "Brazilian Real", "decimals": 2},
+    "KRW": {"symbol": "₩", "name": "South Korean Won", "decimals": 0},
+    "MXN": {"symbol": "MX$", "name": "Mexican Peso", "decimals": 2},
+    "SGD": {"symbol": "S$", "name": "Singapore Dollar", "decimals": 2},
+    "SEK": {"symbol": "kr", "name": "Swedish Krona", "decimals": 2},
+    "NZD": {"symbol": "NZ$", "name": "New Zealand Dollar", "decimals": 2},
+}
+
+
+def get_currency_symbol(currency: str) -> str:
+    """Get the symbol for a currency code."""
+    info = CURRENCIES.get(currency.upper())
+    return info["symbol"] if info else currency
+
+
+def format_amount(amount: float, currency: str = "USD") -> str:
+    """Format an amount with the appropriate currency symbol and decimal places."""
+    info = CURRENCIES.get(currency.upper(), {"symbol": currency, "decimals": 2})
+    decimals = info["decimals"]
+    symbol = info["symbol"]
+    return f"{symbol}{amount:,.{decimals}f}"
+
+
 class LineItem(BaseModel):
     """A single line item on an invoice."""
 
     description: str
     quantity: float = 1.0
     unit_price: float
+    tax_rate: float = 0.0  # Tax rate as percentage (e.g. 8.5 for 8.5%)
     total: Optional[float] = None
+    tax_amount: Optional[float] = None
 
     def model_post_init(self, __context: object) -> None:
         if self.total is None:
             self.total = round(self.quantity * self.unit_price, 2)
+        if self.tax_amount is None and self.tax_rate > 0:
+            self.tax_amount = round(self.total * self.tax_rate / 100, 2)
+
+    @property
+    def total_with_tax(self) -> float:
+        return round(self.total + (self.tax_amount or 0), 2)
 
 
 class Client(BaseModel):
@@ -38,7 +88,8 @@ class Client(BaseModel):
     name: str
     email: Optional[str] = None
     address: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    currency: str = "USD"  # Default billing currency
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
 
 class Invoice(BaseModel):
@@ -53,12 +104,25 @@ class Invoice(BaseModel):
     due_date: Optional[date] = None
     paid_date: Optional[date] = None
     notes: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    currency: str = "USD"
+    tax_rate: float = 0.0  # Invoice-level tax rate applied to items without their own tax
+    discount_amount: float = 0.0  # Flat discount amount
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
     @property
     def subtotal(self) -> float:
         return round(sum(item.total or 0 for item in self.line_items), 2)
+
+    @property
+    def total_tax(self) -> float:
+        """Total tax across all line items."""
+        return round(sum(item.tax_amount or 0 for item in self.line_items), 2)
+
+    @property
+    def total(self) -> float:
+        """Grand total: subtotal + tax - discount."""
+        return round(self.subtotal + self.total_tax - self.discount_amount, 2)
 
     @property
     def is_overdue(self) -> bool:
@@ -85,25 +149,34 @@ class Invoice(BaseModel):
 
     def to_markdown(self) -> str:
         """Export invoice as markdown."""
+        sym = get_currency_symbol(self.currency)
         lines = [
             f"# Invoice {self.id}",
             "",
             f"**Client:** {self.client_name or self.client_id}",
             f"**Status:** {self.status.value.upper()}",
+            f"**Currency:** {self.currency}",
             f"**Issue Date:** {self.issue_date}",
             f"**Due Date:** {self.due_date or 'N/A'}",
             "",
             "## Line Items",
             "",
-            "| Description | Qty | Unit Price | Total |",
-            "|---|---|---|---|",
+            "| Description | Qty | Unit Price | Tax % | Tax | Total |",
+            "|---|---|---|---|---|---|",
         ]
         for item in self.line_items:
+            tax_pct = f"{item.tax_rate}%" if item.tax_rate > 0 else "—"
+            tax_amt = f"{sym}{item.tax_amount:.2f}" if item.tax_amount else "—"
             lines.append(
-                f"| {item.description} | {item.quantity} | ${item.unit_price:.2f} | ${item.total:.2f} |"
+                f"| {item.description} | {item.quantity} | {sym}{item.unit_price:.2f} | {tax_pct} | {tax_amt} | {sym}{item.total:.2f} |"
             )
         lines.append("")
-        lines.append(f"**Subtotal: ${self.subtotal:.2f}**")
+        lines.append(f"**Subtotal: {sym}{self.subtotal:.2f}**")
+        if self.total_tax > 0:
+            lines.append(f"**Tax: {sym}{self.total_tax:.2f}**")
+        if self.discount_amount > 0:
+            lines.append(f"**Discount: -{sym}{self.discount_amount:.2f}**")
+        lines.append(f"**Total: {sym}{self.total:.2f}**")
         if self.notes:
             lines.append("")
             lines.append(f"**Notes:** {self.notes}")
@@ -113,6 +186,92 @@ class Invoice(BaseModel):
         return "\n".join(lines)
 
 
+class RecurringInvoice(BaseModel):
+    """A recurring invoice template that generates invoices on a schedule."""
+
+    id: str = Field(default_factory=lambda: f"REC-{uuid.uuid4().hex[:6].upper()}")
+    client_id: str
+    client_name: Optional[str] = None
+    line_items: list[LineItem] = []
+    frequency: RecurrenceFrequency = RecurrenceFrequency.MONTHLY
+    currency: str = "USD"
+    tax_rate: float = 0.0
+    discount_amount: float = 0.0
+    due_days: int = 30
+    notes: Optional[str] = None
+    active: bool = True
+    next_date: Optional[date] = None  # Next date to generate an invoice
+    last_generated: Optional[date] = None
+    invoice_ids: list[str] = []  # IDs of generated invoices
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @property
+    def subtotal(self) -> float:
+        return round(sum(item.total or 0 for item in self.line_items), 2)
+
+    @property
+    def total_tax(self) -> float:
+        return round(sum(item.tax_amount or 0 for item in self.line_items), 2)
+
+    @property
+    def total(self) -> float:
+        return round(self.subtotal + self.total_tax - self.discount_amount, 2)
+
+    def compute_next_date(self, from_date: Optional[date] = None) -> date:
+        """Compute the next invoice date based on frequency."""
+        base = from_date or self.next_date or date.today()
+        freq_map = {
+            RecurrenceFrequency.WEEKLY: timedelta(weeks=1),
+            RecurrenceFrequency.BIWEEKLY: timedelta(weeks=2),
+            RecurrenceFrequency.MONTHLY: timedelta(days=30),  # approximate
+            RecurrenceFrequency.QUARTERLY: timedelta(days=90),
+            RecurrenceFrequency.YEARLY: timedelta(days=365),
+        }
+        delta = freq_map[self.frequency]
+        return base + delta
+
+    def generate_invoice(self, invoice_id: str) -> Invoice:
+        """Generate an Invoice from this recurring template."""
+        invoice = Invoice(
+            id=invoice_id,
+            client_id=self.client_id,
+            client_name=self.client_name,
+            line_items=[item.model_copy() for item in self.line_items],
+            status=InvoiceStatus.DRAFT,
+            currency=self.currency,
+            tax_rate=self.tax_rate,
+            discount_amount=self.discount_amount,
+            notes=self.notes,
+        )
+        invoice.set_due_date(self.due_days)
+        self.last_generated = date.today()
+        self.next_date = self.compute_next_date()
+        self.invoice_ids.append(invoice_id)
+        self.updated_at = datetime.now(tz=timezone.utc)
+        return invoice
+
+
+class NumberingConfig(BaseModel):
+    """Configuration for invoice numbering."""
+
+    prefix: str = "INV"
+    separator: str = "-"
+    digits: int = 4
+    next_number: int = 1
+
+    def format_number(self, number: Optional[int] = None) -> str:
+        """Format an invoice number using the configured template."""
+        n = number if number is not None else self.next_number
+        return f"{self.prefix}{self.separator}{n:0{self.digits}d}"
+
+    def advance(self) -> str:
+        """Get the next number and advance the counter."""
+        num = self.format_number()
+        self.next_number += 1
+        return num
+
+
 class EarningsSummary(BaseModel):
     """Summary of earnings across all invoices."""
 
@@ -120,7 +279,10 @@ class EarningsSummary(BaseModel):
     total_paid: float = 0.0
     total_pending: float = 0.0
     total_overdue: float = 0.0
+    total_tax: float = 0.0
+    total_discounts: float = 0.0
     invoice_count: int = 0
     paid_count: int = 0
     pending_count: int = 0
     overdue_count: int = 0
+    currency: str = "USD"

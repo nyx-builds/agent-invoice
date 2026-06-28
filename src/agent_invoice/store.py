@@ -7,24 +7,50 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, Invoice, InvoiceStatus
+from .models import Client, Invoice, InvoiceStatus, NumberingConfig, RecurringInvoice
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
 
 
 class InvoiceStore:
-    """Manages persistence of invoices and clients as JSON files."""
+    """Manages persistence of invoices, clients, and config as JSON files."""
 
     def __init__(self, data_dir: Optional[str] = None):
         self.data_dir = Path(data_dir or os.environ.get("AGENT_INVOICE_DIR", DEFAULT_DATA_DIR))
         self.invoices_dir = self.data_dir / "invoices"
         self.clients_dir = self.data_dir / "clients"
+        self.recurring_dir = self.data_dir / "recurring"
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
         self.invoices_dir.mkdir(parents=True, exist_ok=True)
         self.clients_dir.mkdir(parents=True, exist_ok=True)
+        self.recurring_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Numbering config ---
+
+    def get_numbering_config(self) -> NumberingConfig:
+        """Load or create the numbering configuration."""
+        path = self.data_dir / "numbering.json"
+        if path.exists():
+            return NumberingConfig.model_validate_json(path.read_text())
+        config = NumberingConfig()
+        path.write_text(config.model_dump_json(indent=2))
+        return config
+
+    def save_numbering_config(self, config: NumberingConfig) -> NumberingConfig:
+        """Save the numbering configuration."""
+        path = self.data_dir / "numbering.json"
+        path.write_text(config.model_dump_json(indent=2))
+        return config
+
+    def get_next_invoice_number(self) -> str:
+        """Get the next invoice number using the configured numbering template."""
+        config = self.get_numbering_config()
+        number = config.advance()
+        self.save_numbering_config(config)
+        return number
 
     # --- Client operations ---
 
@@ -62,15 +88,20 @@ class InvoiceStore:
 
     # --- Invoice operations ---
 
+    @staticmethod
+    def _safe_filename(invoice_id: str) -> str:
+        """Convert an invoice ID to a safe filename by replacing path separators."""
+        return invoice_id.replace("/", "_").replace("\\", "_")
+
     def save_invoice(self, invoice: Invoice) -> Invoice:
         # Check overdue status before saving
         invoice.check_overdue()
-        path = self.invoices_dir / f"{invoice.id}.json"
+        path = self.invoices_dir / f"{self._safe_filename(invoice.id)}.json"
         path.write_text(invoice.model_dump_json(indent=2))
         return invoice
 
     def get_invoice(self, invoice_id: str) -> Optional[Invoice]:
-        path = self.invoices_dir / f"{invoice_id}.json"
+        path = self.invoices_dir / f"{self._safe_filename(invoice_id)}.json"
         if not path.exists():
             return None
         return Invoice.model_validate_json(path.read_text())
@@ -79,6 +110,7 @@ class InvoiceStore:
         self,
         status: Optional[InvoiceStatus] = None,
         client_id: Optional[str] = None,
+        currency: Optional[str] = None,
     ) -> list[Invoice]:
         invoices = []
         for path in sorted(self.invoices_dir.glob("*.json")):
@@ -89,24 +121,43 @@ class InvoiceStore:
                 continue
             if client_id and inv.client_id != client_id:
                 continue
+            if currency and inv.currency != currency.upper():
+                continue
             invoices.append(inv)
         return invoices
 
     def delete_invoice(self, invoice_id: str) -> bool:
-        path = self.invoices_dir / f"{invoice_id}.json"
+        path = self.invoices_dir / f"{self._safe_filename(invoice_id)}.json"
         if path.exists():
             path.unlink()
             return True
         return False
 
-    def get_next_invoice_number(self) -> str:
-        """Get the next sequential invoice number based on existing invoices."""
-        existing = self.list_invoices()
-        max_num = 0
-        for inv in existing:
-            try:
-                num = int(inv.id.split("-")[1])
-                max_num = max(max_num, num)
-            except (IndexError, ValueError):
+    # --- Recurring invoice operations ---
+
+    def save_recurring(self, recurring: RecurringInvoice) -> RecurringInvoice:
+        path = self.recurring_dir / f"{recurring.id}.json"
+        path.write_text(recurring.model_dump_json(indent=2))
+        return recurring
+
+    def get_recurring(self, recurring_id: str) -> Optional[RecurringInvoice]:
+        path = self.recurring_dir / f"{recurring_id}.json"
+        if not path.exists():
+            return None
+        return RecurringInvoice.model_validate_json(path.read_text())
+
+    def list_recurring(self, active_only: bool = False) -> list[RecurringInvoice]:
+        recurrings = []
+        for path in sorted(self.recurring_dir.glob("*.json")):
+            rec = RecurringInvoice.model_validate_json(path.read_text())
+            if active_only and not rec.active:
                 continue
-        return f"INV-{max_num + 1:04d}"
+            recurrings.append(rec)
+        return recurrings
+
+    def delete_recurring(self, recurring_id: str) -> bool:
+        path = self.recurring_dir / f"{recurring_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
