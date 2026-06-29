@@ -342,6 +342,153 @@ class NumberingConfig(BaseModel):
         return num
 
 
+class InvoiceTemplate(BaseModel):
+    """A reusable invoice template for quick invoice creation."""
+
+    id: str = Field(default_factory=lambda: f"TPL-{uuid.uuid4().hex[:6].upper()}")
+    name: str
+    description: Optional[str] = None
+    line_items: list[LineItem] = []
+    tax_rate: float = 0.0
+    discount_amount: float = 0.0
+    due_days: int = 30
+    currency: str = "USD"
+    notes: Optional[str] = None
+    category: Optional[str] = None  # e.g. "consulting", "retainer", "project"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @property
+    def subtotal(self) -> float:
+        return round(sum(item.total or 0 for item in self.line_items), 2)
+
+    @property
+    def total_tax(self) -> float:
+        return round(sum(item.tax_amount or 0 for item in self.line_items), 2)
+
+    @property
+    def total(self) -> float:
+        return round(self.subtotal + self.total_tax - self.discount_amount, 2)
+
+
+# Built-in invoice templates
+BUILTIN_TEMPLATES: list[dict] = [
+    {
+        "id": "TPL-HOURLY",
+        "name": "Hourly Consulting",
+        "description": "Standard hourly consulting engagement",
+        "category": "consulting",
+        "line_items": [
+            {"description": "Consulting hours", "quantity": 1, "unit_price": 150.0},
+        ],
+        "tax_rate": 0.0,
+        "due_days": 30,
+        "currency": "USD",
+    },
+    {
+        "id": "TPL-RETAINER",
+        "name": "Monthly Retainer",
+        "description": "Monthly retainer for ongoing services",
+        "category": "retainer",
+        "line_items": [
+            {"description": "Monthly retainer", "quantity": 1, "unit_price": 2000.0},
+        ],
+        "tax_rate": 0.0,
+        "due_days": 15,
+        "currency": "USD",
+    },
+    {
+        "id": "TPL-PROJECT",
+        "name": "Fixed-Price Project",
+        "description": "Fixed-price project with milestone payments",
+        "category": "project",
+        "line_items": [
+            {"description": "Project delivery", "quantity": 1, "unit_price": 5000.0},
+        ],
+        "tax_rate": 0.0,
+        "due_days": 30,
+        "currency": "USD",
+    },
+    {
+        "id": "TPL-SUPPORT",
+        "name": "Support & Maintenance",
+        "description": "Monthly support and maintenance package",
+        "category": "support",
+        "line_items": [
+            {"description": "Support & maintenance", "quantity": 1, "unit_price": 500.0},
+        ],
+        "tax_rate": 0.0,
+        "due_days": 30,
+        "currency": "USD",
+    },
+    {
+        "id": "TPL-DEV",
+        "name": "Development Sprint",
+        "description": "Two-week development sprint",
+        "category": "development",
+        "line_items": [
+            {"description": "Development sprint (2 weeks)", "quantity": 1, "unit_price": 4000.0},
+        ],
+        "tax_rate": 0.0,
+        "due_days": 14,
+        "currency": "USD",
+    },
+]
+
+
+class DunningLevel(str, Enum):
+    """Escalation levels for dunning reminders."""
+    FIRST_REMINDER = "first_reminder"
+    SECOND_REMINDER = "second_reminder"
+    FINAL_NOTICE = "final_notice"
+
+
+class DunningAction(BaseModel):
+    """A dunning action/reminder sent for an overdue invoice."""
+    id: str = Field(default_factory=lambda: f"DUN-{uuid.uuid4().hex[:6].upper()}")
+    invoice_id: str
+    level: DunningLevel
+    message: Optional[str] = None
+    sent_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    days_overdue: int = 0
+
+
+class DunningConfig(BaseModel):
+    """Configuration for dunning (overdue reminder) automation."""
+    first_reminder_days: int = 7   # Send first reminder N days after due date
+    second_reminder_days: int = 14  # Send second reminder N days after due date
+    final_notice_days: int = 30    # Send final notice N days after due date
+    enabled: bool = True
+
+    def get_level_for_days_overdue(self, days_overdue: int) -> Optional[DunningLevel]:
+        """Determine which dunning level applies for a given number of days overdue."""
+        if days_overdue >= self.final_notice_days:
+            return DunningLevel.FINAL_NOTICE
+        elif days_overdue >= self.second_reminder_days:
+            return DunningLevel.SECOND_REMINDER
+        elif days_overdue >= self.first_reminder_days:
+            return DunningLevel.FIRST_REMINDER
+        return None
+
+    def get_message_for_level(self, level: DunningLevel, invoice_id: str, days_overdue: int, amount: float, currency: str = "USD") -> str:
+        """Get a default dunning message for a given level."""
+        sym = get_currency_symbol(currency)
+        messages = {
+            DunningLevel.FIRST_REMINDER: (
+                f"Reminder: Invoice {invoice_id} is {days_overdue} days overdue. "
+                f"Amount due: {sym}{amount:,.2f}. Please submit payment at your earliest convenience."
+            ),
+            DunningLevel.SECOND_REMINDER: (
+                f"Second Notice: Invoice {invoice_id} is now {days_overdue} days overdue. "
+                f"Amount due: {sym}{amount:,.2f}. Please remit payment immediately to avoid further action."
+            ),
+            DunningLevel.FINAL_NOTICE: (
+                f"FINAL NOTICE: Invoice {invoice_id} is {days_overdue} days overdue. "
+                f"Amount due: {sym}{amount:,.2f}. This is our final notice before escalating collection efforts."
+            ),
+        }
+        return messages.get(level, "")
+
+
 class EarningsSummary(BaseModel):
     """Summary of earnings across all invoices."""
 

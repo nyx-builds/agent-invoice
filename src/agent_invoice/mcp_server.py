@@ -461,6 +461,309 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="update_client",
+            description="Update a client's details (name, email, address, currency).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "Client ID or name to update",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "New name",
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "New email",
+                    },
+                    "address": {
+                        "type": "string",
+                        "description": "New address",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "New default currency code",
+                    },
+                },
+                "required": ["identifier"],
+            },
+        ),
+        Tool(
+            name="add_line_item",
+            description="Add a line item to a draft invoice.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The invoice ID",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Item description",
+                    },
+                    "quantity": {
+                        "type": "number",
+                        "description": "Quantity (default: 1)",
+                        "default": 1,
+                    },
+                    "unit_price": {
+                        "type": "number",
+                        "description": "Unit price",
+                    },
+                    "tax_rate": {
+                        "type": "number",
+                        "description": "Tax rate % for this item",
+                    },
+                },
+                "required": ["invoice_id", "description", "unit_price"],
+            },
+        ),
+        Tool(
+            name="remove_line_item",
+            description="Remove a line item from a draft invoice by its index (0-based).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The invoice ID",
+                    },
+                    "index": {
+                        "type": "integer",
+                        "description": "0-based index of the line item to remove",
+                    },
+                },
+                "required": ["invoice_id", "index"],
+            },
+        ),
+        Tool(
+            name="list_templates",
+            description="List available invoice templates (built-in and custom). Templates let you quickly create invoices with pre-defined line items.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by category",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_template",
+            description="Get full details of an invoice template by ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "template_id": {
+                        "type": "string",
+                        "description": "Template ID (e.g. TPL-service-retainer)",
+                    },
+                },
+                "required": ["template_id"],
+            },
+        ),
+        Tool(
+            name="create_template",
+            description="Create a custom invoice template with pre-defined line items, tax, and discount.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Template name",
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "quantity": {"type": "number", "default": 1},
+                                "unit_price": {"type": "number"},
+                                "tax_rate": {"type": "number"},
+                            },
+                            "required": ["description", "unit_price"],
+                        },
+                        "description": "Line items for the template",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Template description",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Template category (e.g. consulting, subscription)",
+                    },
+                    "due_days": {
+                        "type": "integer",
+                        "description": "Days until due date (default: 30)",
+                        "default": 30,
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Currency code (default: USD)",
+                        "default": "USD",
+                    },
+                    "tax_rate": {
+                        "type": "number",
+                        "description": "Invoice-level tax rate %",
+                    },
+                    "discount_amount": {
+                        "type": "number",
+                        "description": "Flat discount amount",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Notes for generated invoices",
+                    },
+                },
+                "required": ["name", "items"],
+            },
+        ),
+        Tool(
+            name="create_invoice_from_template",
+            description="Create an invoice from a template, with optional overrides for due days, discount, notes, or currency.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "template_id": {
+                        "type": "string",
+                        "description": "Template ID to use",
+                    },
+                    "client": {
+                        "type": "string",
+                        "description": "Client ID or name",
+                    },
+                    "due_days": {
+                        "type": "integer",
+                        "description": "Override due days",
+                    },
+                    "discount_amount": {
+                        "type": "number",
+                        "description": "Override discount amount",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Override notes",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Override currency",
+                    },
+                },
+                "required": ["template_id", "client"],
+            },
+        ),
+        Tool(
+            name="remove_template",
+            description="Remove a custom template. Built-in templates cannot be removed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "template_id": {
+                        "type": "string",
+                        "description": "Template ID to remove",
+                    },
+                },
+                "required": ["template_id"],
+            },
+        ),
+        Tool(
+            name="get_dunning_config",
+            description="Get the current dunning (overdue reminder) configuration.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="update_dunning_config",
+            description="Update the dunning configuration — set days overdue thresholds for first reminder, second reminder, and final notice.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "first_reminder_days": {
+                        "type": "integer",
+                        "description": "Days overdue for first reminder",
+                    },
+                    "second_reminder_days": {
+                        "type": "integer",
+                        "description": "Days overdue for second reminder",
+                    },
+                    "final_notice_days": {
+                        "type": "integer",
+                        "description": "Days overdue for final notice",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Enable or disable dunning",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="send_dunning_reminder",
+            description="Send a dunning (overdue) reminder for a specific invoice. Optionally specify the level and custom message.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The overdue invoice ID",
+                    },
+                    "level": {
+                        "type": "string",
+                        "enum": ["first_reminder", "second_reminder", "final_notice"],
+                        "description": "Dunning level (auto-determined if not specified)",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Custom reminder message",
+                    },
+                },
+                "required": ["invoice_id"],
+            },
+        ),
+        Tool(
+            name="process_overdue_dunning",
+            description="Auto-check all overdue invoices and send appropriate dunning reminders. Call this periodically (e.g. daily) to handle overdue accounts.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="list_dunning_actions",
+            description="List all dunning actions/reminders sent, optionally filtered by invoice.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "Filter by invoice ID",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="remove_dunning_action",
+            description="Remove a dunning action record.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action_id": {
+                        "type": "string",
+                        "description": "The dunning action ID to remove",
+                    },
+                },
+                "required": ["action_id"],
+            },
+        ),
     ]
 
 
@@ -775,6 +1078,199 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 "decimals": info["decimals"],
             })
         return _json_result(result)
+
+    elif name == "update_client":
+        try:
+            c = svc.update_client(
+                identifier=arguments["identifier"],
+                name=arguments.get("name"),
+                email=arguments.get("email"),
+                address=arguments.get("address"),
+                currency=arguments.get("currency"),
+            )
+            return _json_result({"id": c.id, "name": c.name, "email": c.email, "currency": c.currency})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "add_line_item":
+        try:
+            item_data = {
+                "description": arguments["description"],
+                "quantity": arguments.get("quantity", 1.0),
+                "unit_price": arguments["unit_price"],
+            }
+            if "tax_rate" in arguments:
+                item_data["tax_rate"] = arguments["tax_rate"]
+            inv = svc.add_line_item(arguments["invoice_id"], item_data)
+            return _json_result({
+                "id": inv.id, "items": len(inv.line_items),
+                "subtotal": inv.subtotal, "total": inv.total,
+                "currency": inv.currency,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_line_item":
+        try:
+            inv = svc.remove_line_item(arguments["invoice_id"], arguments["index"])
+            return _json_result({
+                "id": inv.id, "items": len(inv.line_items),
+                "subtotal": inv.subtotal, "total": inv.total,
+                "currency": inv.currency,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_templates":
+        templates = svc.list_templates(category=arguments.get("category"))
+        result = []
+        for tpl in templates:
+            result.append({
+                "id": tpl.id, "name": tpl.name, "description": tpl.description,
+                "category": tpl.category, "currency": tpl.currency,
+                "total": tpl.total, "due_days": tpl.due_days,
+                "items": len(tpl.line_items),
+            })
+        return _json_result(result)
+
+    elif name == "get_template":
+        tpl = svc.get_template(arguments["template_id"])
+        if not tpl:
+            return _text_result(f"Template not found: {arguments['template_id']}")
+        data = tpl.model_dump(mode="json")
+        data["subtotal"] = tpl.subtotal
+        data["total_tax"] = tpl.total_tax
+        data["total"] = tpl.total
+        return _json_result(data)
+
+    elif name == "create_template":
+        try:
+            items = arguments["items"]
+            tpl = svc.create_template(
+                name=arguments["name"],
+                line_items=items,
+                description=arguments.get("description"),
+                category=arguments.get("category"),
+                due_days=arguments.get("due_days", 30),
+                currency=arguments.get("currency", "USD"),
+                tax_rate=arguments.get("tax_rate"),
+                discount_amount=arguments.get("discount_amount"),
+                notes=arguments.get("notes"),
+            )
+            return _json_result({
+                "id": tpl.id, "name": tpl.name, "currency": tpl.currency,
+                "total": tpl.total, "items": len(tpl.line_items),
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "create_invoice_from_template":
+        try:
+            overrides = {}
+            if "due_days" in arguments:
+                overrides["due_days"] = arguments["due_days"]
+            if "discount_amount" in arguments:
+                overrides["discount_amount"] = arguments["discount_amount"]
+            if "notes" in arguments:
+                overrides["notes"] = arguments["notes"]
+            if "currency" in arguments:
+                overrides["currency"] = arguments["currency"]
+            inv = svc.create_invoice_from_template(
+                template_id=arguments["template_id"],
+                client_identifier=arguments["client"],
+                overrides=overrides,
+            )
+            return _json_result({
+                "id": inv.id, "client": inv.client_name, "currency": inv.currency,
+                "total": inv.total, "status": inv.status.value,
+                "due_date": str(inv.due_date) if inv.due_date else None,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_template":
+        try:
+            if svc.remove_template(arguments["template_id"]):
+                return _json_result({"removed": True, "template_id": arguments["template_id"]})
+            return _text_result(f"Template not found: {arguments['template_id']}")
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "get_dunning_config":
+        config = svc.get_dunning_config()
+        return _json_result({
+            "enabled": config.enabled,
+            "first_reminder_days": config.first_reminder_days,
+            "second_reminder_days": config.second_reminder_days,
+            "final_notice_days": config.final_notice_days,
+        })
+
+    elif name == "update_dunning_config":
+        try:
+            config = svc.update_dunning_config(
+                first_reminder_days=arguments.get("first_reminder_days"),
+                second_reminder_days=arguments.get("second_reminder_days"),
+                final_notice_days=arguments.get("final_notice_days"),
+                enabled=arguments.get("enabled"),
+            )
+            return _json_result({
+                "enabled": config.enabled,
+                "first_reminder_days": config.first_reminder_days,
+                "second_reminder_days": config.second_reminder_days,
+                "final_notice_days": config.final_notice_days,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "send_dunning_reminder":
+        try:
+            action = svc.send_dunning_reminder(
+                invoice_id=arguments["invoice_id"],
+                level=arguments.get("level"),
+                message=arguments.get("message"),
+            )
+            return _json_result({
+                "id": action.id,
+                "invoice_id": action.invoice_id,
+                "level": action.level.value,
+                "days_overdue": action.days_overdue,
+                "message": action.message,
+                "sent_at": str(action.sent_at),
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "process_overdue_dunning":
+        actions = svc.process_overdue_dunning()
+        result = []
+        for action in actions:
+            result.append({
+                "id": action.id,
+                "invoice_id": action.invoice_id,
+                "level": action.level.value,
+                "days_overdue": action.days_overdue,
+                "message": action.message,
+            })
+        return _json_result({"processed_count": len(result), "actions": result})
+
+    elif name == "list_dunning_actions":
+        actions = svc.list_dunning_actions(invoice_id=arguments.get("invoice_id"))
+        result = []
+        for action in actions:
+            result.append({
+                "id": action.id,
+                "invoice_id": action.invoice_id,
+                "level": action.level.value,
+                "days_overdue": action.days_overdue,
+                "message": action.message,
+                "sent_at": str(action.sent_at),
+            })
+        return _json_result(result)
+
+    elif name == "remove_dunning_action":
+        if svc.remove_dunning_action(arguments["action_id"]):
+            return _json_result({"removed": True, "action_id": arguments["action_id"]})
+        return _text_result(f"Dunning action not found: {arguments['action_id']}")
 
     return _text_result(f"Unknown tool: {name}")
 

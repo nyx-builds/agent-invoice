@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, Invoice, InvoiceStatus, NumberingConfig, RecurringInvoice
+from .models import Client, DunningAction, DunningConfig, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
@@ -21,12 +21,16 @@ class InvoiceStore:
         self.invoices_dir = self.data_dir / "invoices"
         self.clients_dir = self.data_dir / "clients"
         self.recurring_dir = self.data_dir / "recurring"
+        self.templates_dir = self.data_dir / "templates"
+        self.dunning_dir = self.data_dir / "dunning"
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
         self.invoices_dir.mkdir(parents=True, exist_ok=True)
         self.clients_dir.mkdir(parents=True, exist_ok=True)
         self.recurring_dir.mkdir(parents=True, exist_ok=True)
+        self.templates_dir.mkdir(parents=True, exist_ok=True)
+        self.dunning_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Numbering config ---
 
@@ -85,6 +89,12 @@ class InvoiceStore:
             path.unlink()
             return True
         return False
+
+    def update_client(self, client: Client) -> Client:
+        """Save updated client data."""
+        path = self.clients_dir / f"{client.id}.json"
+        path.write_text(client.model_dump_json(indent=2))
+        return client
 
     # --- Invoice operations ---
 
@@ -157,6 +167,82 @@ class InvoiceStore:
 
     def delete_recurring(self, recurring_id: str) -> bool:
         path = self.recurring_dir / f"{recurring_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Template operations ---
+
+    def save_template(self, template: InvoiceTemplate) -> InvoiceTemplate:
+        path = self.templates_dir / f"{template.id}.json"
+        path.write_text(template.model_dump_json(indent=2))
+        return template
+
+    def get_template(self, template_id: str) -> Optional[InvoiceTemplate]:
+        path = self.templates_dir / f"{template_id}.json"
+        if not path.exists():
+            return None
+        return InvoiceTemplate.model_validate_json(path.read_text())
+
+    def list_templates(self, category: Optional[str] = None) -> list[InvoiceTemplate]:
+        templates = []
+        for path in sorted(self.templates_dir.glob("*.json")):
+            tpl = InvoiceTemplate.model_validate_json(path.read_text())
+            if category and tpl.category != category:
+                continue
+            templates.append(tpl)
+        return templates
+
+    def delete_template(self, template_id: str) -> bool:
+        path = self.templates_dir / f"{template_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Dunning operations ---
+
+    def get_dunning_config(self) -> DunningConfig:
+        """Load or create the dunning configuration."""
+        path = self.data_dir / "dunning_config.json"
+        if path.exists():
+            return DunningConfig.model_validate_json(path.read_text())
+        config = DunningConfig()
+        path.write_text(config.model_dump_json(indent=2))
+        return config
+
+    def save_dunning_config(self, config: DunningConfig) -> DunningConfig:
+        """Save the dunning configuration."""
+        path = self.data_dir / "dunning_config.json"
+        path.write_text(config.model_dump_json(indent=2))
+        return config
+
+    def save_dunning_action(self, action: DunningAction) -> DunningAction:
+        path = self.dunning_dir / f"{action.id}.json"
+        path.write_text(action.model_dump_json(indent=2))
+        return action
+
+    def get_dunning_action(self, action_id: str) -> Optional[DunningAction]:
+        path = self.dunning_dir / f"{action_id}.json"
+        if not path.exists():
+            return None
+        return DunningAction.model_validate_json(path.read_text())
+
+    def list_dunning_actions(
+        self,
+        invoice_id: Optional[str] = None,
+    ) -> list[DunningAction]:
+        actions = []
+        for path in sorted(self.dunning_dir.glob("*.json")):
+            action = DunningAction.model_validate_json(path.read_text())
+            if invoice_id and action.invoice_id != invoice_id:
+                continue
+            actions.append(action)
+        return actions
+
+    def delete_dunning_action(self, action_id: str) -> bool:
+        path = self.dunning_dir / f"{action_id}.json"
         if path.exists():
             path.unlink()
             return True

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-invoice"
-version = "0.3.0"
-description = "MCP server + CLI for autonomous agents to generate, track, and manage invoices"
+version = "0.4.0"
+description = "MCP server + CLI + REST API for autonomous agents to generate, track, and manage invoices"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -27,6 +27,8 @@ dependencies = [
     "rich>=13.0",
     "click>=8.0",
     "reportlab>=4.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
 ]
 
 [project.optional-dependencies]

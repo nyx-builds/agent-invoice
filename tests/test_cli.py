@@ -24,7 +24,7 @@ class TestCLI:
     def test_version(self, runner):
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.3.0" in result.output
+        assert "0.4.0" in result.output
 
     def test_client_add(self, runner, env_home):
         result = runner.invoke(main, ["client", "add", "Acme Corp", "--email", "billing@acme.com"])

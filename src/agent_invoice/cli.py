@@ -9,7 +9,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from .models import CURRENCIES, InvoiceStatus, RecurrenceFrequency, format_amount, get_currency_symbol
+from .models import CURRENCIES, BUILTIN_TEMPLATES, DunningLevel, InvoiceStatus, RecurrenceFrequency, format_amount, get_currency_symbol
 from .service import InvoiceService
 from .store import InvoiceStore
 
@@ -79,6 +79,27 @@ def client_remove(identifier: str):
         console.print(f"[green]✓[/green] Client removed: {identifier}")
     else:
         console.print(f"[red]✗[/red] Client not found: {identifier}")
+        sys.exit(1)
+
+
+@client.command("update")
+@click.argument("identifier")
+@click.option("--name", "-n", help="New name")
+@click.option("--email", "-e", help="New email")
+@click.option("--address", "-a", help="New address")
+@click.option("--currency", "-c", help="New default currency")
+def client_update(identifier: str, name: Optional[str], email: Optional[str], address: Optional[str], currency: Optional[str]):
+    """Update a client's details."""
+    svc = get_service()
+    try:
+        c = svc.update_client(identifier, name=name, email=email, address=address, currency=currency)
+        console.print(f"[green]✓[/green] Client updated: {c.id} — {c.name}")
+        if email:
+            console.print(f"  Email: {c.email}")
+        if currency:
+            console.print(f"  Currency: {c.currency}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
         sys.exit(1)
 
 
@@ -321,6 +342,54 @@ def invoice_discount(invoice_id: str, amount: float):
         sym = get_currency_symbol(inv.currency)
         console.print(f"[green]✓[/green] Discount of {sym}{amount:.2f} applied to {inv.id}")
         console.print(f"  New total: {sym}{inv.total:.2f}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+# --- Line item commands ---
+
+@main.group("items")
+def items():
+    """Manage invoice line items."""
+    pass
+
+
+@items.command("add")
+@click.argument("invoice_id")
+@click.option("--description", "-d", required=True, help="Item description")
+@click.option("--quantity", "-q", type=float, default=1.0, help="Quantity (default: 1)")
+@click.option("--price", "-p", type=float, required=True, help="Unit price")
+@click.option("--tax-rate", "-t", type=float, default=None, help="Tax rate %")
+def items_add(invoice_id: str, description: str, quantity: float, price: float, tax_rate: Optional[float]):
+    """Add a line item to a draft invoice."""
+    svc = get_service()
+    item_data = {"description": description, "quantity": quantity, "unit_price": price}
+    if tax_rate is not None:
+        item_data["tax_rate"] = tax_rate
+    try:
+        inv = svc.add_line_item(invoice_id, item_data)
+        sym = get_currency_symbol(inv.currency)
+        console.print(f"[green]✓[/green] Item added to {inv.id}")
+        console.print(f"  Items:  {len(inv.line_items)}")
+        console.print(f"  Total:  {sym}{inv.total:.2f}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@items.command("remove")
+@click.argument("invoice_id")
+@click.argument("index", type=int)
+def items_remove(invoice_id: str, index: int):
+    """Remove a line item by index (0-based) from a draft invoice."""
+    svc = get_service()
+    try:
+        inv = svc.remove_line_item(invoice_id, index)
+        sym = get_currency_symbol(inv.currency)
+        console.print(f"[green]✓[/green] Item {index} removed from {inv.id}")
+        console.print(f"  Items:  {len(inv.line_items)}")
+        console.print(f"  Total:  {sym}{inv.total:.2f}")
     except ValueError as e:
         console.print(f"[red]✗[/red] {e}")
         sys.exit(1)
@@ -675,6 +744,309 @@ def list_currencies():
     for code, info in sorted(CURRENCIES.items()):
         table.add_row(code, info["symbol"], info["name"], str(info["decimals"]))
     console.print(table)
+
+
+# --- Template commands ---
+
+@main.group("template")
+def template():
+    """Manage invoice templates."""
+    pass
+
+
+@template.command("list")
+@click.option("--category", help="Filter by category")
+def template_list(category: Optional[str]):
+    """List available invoice templates (built-in + custom)."""
+    svc = get_service()
+    templates = svc.list_templates(category=category)
+    if not templates:
+        console.print("[dim]No templates found.[/dim]")
+        return
+
+    table = Table(title="Invoice Templates")
+    table.add_column("ID", style="cyan")
+    table.add_column("Name", style="bold")
+    table.add_column("Category")
+    table.add_column("Items", justify="right")
+    table.add_column("Total")
+    table.add_column("Due Days", justify="right")
+    table.add_column("Type")
+    for tpl in templates:
+        sym = get_currency_symbol(tpl.currency)
+        tpl_type = "Built-in" if tpl.id.startswith("TPL-") and any(t["id"] == tpl.id for t in BUILTIN_TEMPLATES) else "Custom"
+        table.add_row(
+            tpl.id,
+            tpl.name,
+            tpl.category or "—",
+            str(len(tpl.line_items)),
+            f"{sym}{tpl.total:.2f}",
+            str(tpl.due_days),
+            tpl_type,
+        )
+    console.print(table)
+
+
+@template.command("show")
+@click.argument("template_id")
+def template_show(template_id: str):
+    """Show template details."""
+    svc = get_service()
+    tpl = svc.get_template(template_id)
+    if not tpl:
+        console.print(f"[red]✗[/red] Template not found: {template_id}")
+        sys.exit(1)
+    sym = get_currency_symbol(tpl.currency)
+    console.print(f"\n[bold]Template: {tpl.name}[/bold] ({tpl.id})")
+    if tpl.description:
+        console.print(f"  {tpl.description}")
+    console.print(f"  Category: {tpl.category or '—'}")
+    console.print(f"  Currency: {tpl.currency}")
+    console.print(f"  Due Days: {tpl.due_days}")
+    console.print(f"  Tax Rate: {tpl.tax_rate}%")
+    if tpl.discount_amount > 0:
+        console.print(f"  Discount: {sym}{tpl.discount_amount:.2f}")
+    if tpl.notes:
+        console.print(f"  Notes: {tpl.notes}")
+    console.print(f"\n  [bold]Line Items:[/bold]")
+    for i, item in enumerate(tpl.line_items):
+        tax_str = f" ({item.tax_rate}% tax)" if item.tax_rate > 0 else ""
+        console.print(f"    {i}. {item.description} — qty {item.quantity} × {sym}{item.unit_price:.2f}{tax_str}")
+    console.print(f"\n  [bold]Total: {sym}{tpl.total:.2f}[/bold]")
+
+
+@template.command("create")
+@click.option("--name", "-n", required=True, help="Template name")
+@click.option("--item", "-i", multiple=True, help="Line item: 'description,quantity,unit_price[,tax_rate]'")
+@click.option("--description", "-d", help="Template description")
+@click.option("--category", help="Template category")
+@click.option("--due-days", type=int, default=30, help="Days until due date")
+@click.option("--currency", default="USD", help="Currency (default: USD)")
+@click.option("--tax-rate", type=float, default=0.0, help="Invoice-level tax rate %%")
+@click.option("--discount", type=float, default=0.0, help="Flat discount amount")
+@click.option("--notes", help="Notes for generated invoices")
+def template_create(name: str, item: tuple, description: Optional[str], category: Optional[str], due_days: int, currency: str, tax_rate: float, discount: float, notes: Optional[str]):
+    """Create a custom invoice template."""
+    if not item:
+        console.print("[red]✗[/red] At least one --item is required.")
+        sys.exit(1)
+
+    line_items = []
+    for i in item:
+        parts = [p.strip() for p in i.split(",")]
+        if len(parts) == 4:
+            desc, qty, price, tax = parts
+            line_items.append({"description": desc, "quantity": float(qty), "unit_price": float(price), "tax_rate": float(tax)})
+        elif len(parts) == 3:
+            desc, qty, price = parts
+            line_items.append({"description": desc, "quantity": float(qty), "unit_price": float(price)})
+        elif len(parts) == 2:
+            desc, price = parts
+            line_items.append({"description": desc, "unit_price": float(price)})
+        else:
+            console.print(f"[red]✗[/red] Invalid item format: '{i}'")
+            sys.exit(1)
+
+    svc = get_service()
+    try:
+        tpl = svc.create_template(
+            name=name,
+            line_items=line_items,
+            description=description,
+            tax_rate=tax_rate if tax_rate > 0 else None,
+            discount_amount=discount if discount > 0 else None,
+            due_days=due_days,
+            currency=currency,
+            notes=notes,
+            category=category,
+        )
+        sym = get_currency_symbol(tpl.currency)
+        console.print(f"[green]✓[/green] Template created: {tpl.id} — {tpl.name}")
+        console.print(f"  Items:  {len(tpl.line_items)}")
+        console.print(f"  Total:  {sym}{tpl.total:.2f}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@template.command("use")
+@click.argument("template_id")
+@click.option("--client", "-c", required=True, help="Client ID or name")
+@click.option("--due-days", type=int, default=None, help="Override due days")
+@click.option("--discount", type=float, default=None, help="Override discount amount")
+@click.option("--notes", help="Override notes")
+@click.option("--currency", help="Override currency")
+def template_use(template_id: str, client: str, due_days: Optional[int], discount: Optional[float], notes: Optional[str], currency: Optional[str]):
+    """Create an invoice from a template."""
+    svc = get_service()
+    overrides = {}
+    if due_days is not None:
+        overrides["due_days"] = due_days
+    if discount is not None:
+        overrides["discount_amount"] = discount
+    if notes is not None:
+        overrides["notes"] = notes
+    if currency is not None:
+        overrides["currency"] = currency
+
+    try:
+        inv = svc.create_invoice_from_template(template_id, client, overrides=overrides)
+        sym = get_currency_symbol(inv.currency)
+        console.print(f"[green]✓[/green] Invoice created from template: {inv.id}")
+        console.print(f"  Client: {inv.client_name}")
+        console.print(f"  Items:  {len(inv.line_items)}")
+        console.print(f"  Total:  {sym}{inv.total:.2f}")
+        console.print(f"  Due:    {inv.due_date}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@template.command("remove")
+@click.argument("template_id")
+def template_remove(template_id: str):
+    """Remove a custom template (cannot remove built-in)."""
+    svc = get_service()
+    try:
+        if svc.remove_template(template_id):
+            console.print(f"[green]✓[/green] Template removed: {template_id}")
+        else:
+            console.print(f"[red]✗[/red] Template not found: {template_id}")
+            sys.exit(1)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+# --- Dunning commands ---
+
+@main.group("dunning")
+def dunning():
+    """Manage overdue dunning reminders."""
+    pass
+
+
+@dunning.command("config")
+def dunning_config_show():
+    """Show current dunning configuration."""
+    svc = get_service()
+    config = svc.get_dunning_config()
+    console.print(f"\n[bold]Dunning Configuration[/bold]\n")
+    console.print(f"  Enabled:              {'[green]Yes[/green]' if config.enabled else '[red]No[/red]'}")
+    console.print(f"  First Reminder:      {config.first_reminder_days} days overdue")
+    console.print(f"  Second Reminder:     {config.second_reminder_days} days overdue")
+    console.print(f"  Final Notice:        {config.final_notice_days} days overdue")
+
+
+@dunning.command("set-config")
+@click.option("--first-reminder-days", type=int, help="Days overdue for first reminder")
+@click.option("--second-reminder-days", type=int, help="Days overdue for second reminder")
+@click.option("--final-notice-days", type=int, help="Days overdue for final notice")
+@click.option("--enabled/--disabled", default=None, help="Enable or disable dunning")
+def dunning_config_set(first_reminder_days: Optional[int], second_reminder_days: Optional[int], final_notice_days: Optional[int], enabled: Optional[bool]):
+    """Update dunning configuration."""
+    svc = get_service()
+    try:
+        config = svc.update_dunning_config(
+            first_reminder_days=first_reminder_days,
+            second_reminder_days=second_reminder_days,
+            final_notice_days=final_notice_days,
+            enabled=enabled,
+        )
+        console.print(f"[green]✓[/green] Dunning config updated")
+        console.print(f"  First Reminder:  {config.first_reminder_days} days")
+        console.print(f"  Second Reminder: {config.second_reminder_days} days")
+        console.print(f"  Final Notice:    {config.final_notice_days} days")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@dunning.command("send")
+@click.argument("invoice_id")
+@click.option("--level", "-l", type=click.Choice(["first_reminder", "second_reminder", "final_notice"]), default=None, help="Override dunning level")
+@click.option("--message", "-m", help="Custom reminder message")
+def dunning_send(invoice_id: str, level: Optional[str], message: Optional[str]):
+    """Send a dunning reminder for an overdue invoice."""
+    svc = get_service()
+    try:
+        action = svc.send_dunning_reminder(invoice_id, level=level, message=message)
+        console.print(f"[green]✓[/green] Dunning reminder sent: {action.id}")
+        console.print(f"  Level:  {action.level.value.replace('_', ' ').title()}")
+        console.print(f"  Days Overdue: {action.days_overdue}")
+        if action.message:
+            console.print(f"  Message: {action.message}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@dunning.command("process")
+def dunning_process():
+    """Auto-send dunning reminders for all overdue invoices."""
+    svc = get_service()
+    actions = svc.process_overdue_dunning()
+    if not actions:
+        console.print("[dim]No dunning reminders needed.[/dim]")
+        return
+    console.print(f"[green]✓[/green] Sent {len(actions)} dunning reminder(s):")
+    for action in actions:
+        level_str = action.level.value.replace("_", " ").title()
+        console.print(f"  {action.id} — {action.invoice_id} — {level_str} — {action.days_overdue} days overdue")
+
+
+@dunning.command("list")
+@click.option("--invoice", help="Filter by invoice ID")
+def dunning_list(invoice: Optional[str]):
+    """List dunning actions/reminders."""
+    svc = get_service()
+    actions = svc.list_dunning_actions(invoice_id=invoice)
+    if not actions:
+        console.print("[dim]No dunning actions found.[/dim]")
+        return
+
+    table = Table(title="Dunning Actions")
+    table.add_column("ID", style="cyan")
+    table.add_column("Invoice", style="bold")
+    table.add_column("Level")
+    table.add_column("Days Overdue", justify="right")
+    table.add_column("Sent At")
+    for action in actions:
+        level_str = action.level.value.replace("_", " ").title()
+        table.add_row(
+            action.id,
+            action.invoice_id,
+            level_str,
+            str(action.days_overdue),
+            action.sent_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    console.print(table)
+
+
+@dunning.command("remove")
+@click.argument("action_id")
+def dunning_remove(action_id: str):
+    """Remove a dunning action record."""
+    svc = get_service()
+    if svc.remove_dunning_action(action_id):
+        console.print(f"[green]✓[/green] Dunning action removed: {action_id}")
+    else:
+        console.print(f"[red]✗[/red] Dunning action not found: {action_id}")
+        sys.exit(1)
+
+
+# --- REST API serve ---
+
+@main.command("api")
+@click.option("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
+@click.option("--port", type=int, default=8000, help="Port to bind (default: 8000)")
+def api_serve(host: str, port: int):
+    """Start the REST API server."""
+    from .api import create_app
+    import uvicorn
+    console.print(f"[bold]Starting Agent Invoice REST API on {host}:{port}...[/bold]")
+    app = create_app()
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
