@@ -32,13 +32,16 @@ Agents do work. Agents need to get paid. But there's no standard way for an auto
 - ⏰ **Dunning Automation** — Automated overdue reminders with configurable escalation levels
 - 🔍 **Invoice Search** — Search by text, date range, amount range, status, client, currency
 - 📋 **Invoice Templates** — Built-in and custom templates for quick invoice creation
+- 📑 **Estimates & Quotes** — Create quotes, send, accept/decline, and convert to invoices
+- 📊 **A/R Aging Reports** — Track outstanding receivables by aging buckets (0-30, 31-60, 61-90, 90+ days)
+- 📈 **Revenue Analytics** — Monthly revenue trends, collection rate, avg days to pay, top clients
 - 🏷️ **Custom Numbering** — Configurable invoice numbering (prefix, separator, digits)
 - 📊 **Payment Tracking** — Monitor which invoices are pending, paid, partially paid, or overdue
 - 📒 **Earnings Ledger** — Running total of all income, tax, and discounts across invoices
 - 📤 **Export** — Export invoices as PDF, JSON, or Markdown
-- 🔌 **MCP Server** — 35+ tools for full billing integration via Model Context Protocol
+- 🔌 **MCP Server** — 55 tools for full billing integration via Model Context Protocol
 - 🌐 **REST API** — Full HTTP API with FastAPI for web integration
-- 💻 **CLI** — Command-line interface with 30+ commands for direct use or scripting
+- 💻 **CLI** — Command-line interface with 40+ commands for direct use or scripting
 - 💾 **JSON Storage** — Simple file-based storage, no database required
 
 ## Quick Start
@@ -97,6 +100,23 @@ agent-invoice credit list --status open
 # --- Client statements ---
 agent-invoice statement "Acme Corp" 2026-01-01 2026-06-30
 
+# --- Estimates & Quotes ---
+agent-invoice estimate create "Acme Corp" --description "Website redesign" --quantity 1 --price 5000.00 --terms "Net 30"
+agent-invoice estimate create "Acme Corp" --description "Monthly support" --price 2000.00 --expiry 15 --tax-rate 8.5
+agent-invoice estimate list --status draft
+agent-invoice estimate show EST-ABC123
+agent-invoice estimate send EST-ABC123
+agent-invoice estimate accept EST-ABC123
+agent-invoice estimate convert EST-ABC123 --due-days 30
+
+# --- A/R Aging Report ---
+agent-invoice ar-aging
+agent-invoice ar-aging --currency USD
+
+# --- Revenue Analytics ---
+agent-invoice revenue
+agent-invoice revenue --months 12 --currency USD
+
 # --- Dunning (overdue reminders) ---
 agent-invoice dunning config
 agent-invoice dunning send INV-0001
@@ -121,7 +141,7 @@ Start the MCP server for integration with any MCP-compatible agent:
 agent-invoice serve
 ```
 
-The server exposes **35+ tools**:
+The server exposes **55 tools**:
 
 **Invoices & Line Items:**
 - `create_invoice` — Generate a new invoice (with tax, currency, discounts)
@@ -167,6 +187,19 @@ The server exposes **35+ tools**:
 - `get_numbering_config` / `update_numbering_config`
 - `earnings_summary` / `list_currencies`
 
+**Estimates & Quotes:**
+- `create_estimate` — Create a quote with line items, tax, discount, and expiry
+- `list_estimates` — List quotes with optional status/client filters
+- `get_estimate` — Get full details of a specific quote
+- `send_estimate` — Mark a quote as sent to the client
+- `accept_estimate` / `decline_estimate` — Client decision tracking
+- `convert_estimate_to_invoice` — Convert an accepted quote into an invoice
+- `remove_estimate` — Delete a quote (cannot delete converted ones)
+
+**Reports & Analytics:**
+- `generate_ar_aging_report` — A/R aging with per-client bucket breakdown
+- `get_revenue_analytics` — Monthly trends, collection rate, days to pay, top clients
+
 ### REST API
 
 Start the HTTP server:
@@ -175,7 +208,7 @@ Start the HTTP server:
 uvicorn agent_invoice.api:create_app --factory --port 8000
 ```
 
-Full CRUD API with endpoints for invoices, payments, clients, credit notes, statements, recurring, templates, dunning, earnings, and currencies.
+Full CRUD API with endpoints for invoices, payments, clients, credit notes, statements, recurring, templates, dunning, estimates, reports, earnings, and currencies.
 
 ```bash
 # Create a client
@@ -192,6 +225,20 @@ curl -X POST http://localhost:8000/invoices \
 curl -X POST http://localhost:8000/invoices/INV-0001/payments \
   -H "Content-Type: application/json" \
   -d '{"amount": 500.00, "method": "bank_transfer"}'
+
+# Create an estimate
+curl -X POST http://localhost:8000/estimates \
+  -H "Content-Type: application/json" \
+  -d '{"client": "CLT-...", "line_items": [{"description": "Project", "quantity": 1, "unit_price": 5000}]}'
+
+# Convert an estimate to invoice
+curl -X POST http://localhost:8000/estimates/EST-ABC123/convert?due_days=30
+
+# Get A/R aging report
+curl http://localhost:8000/reports/ar-aging?currency=USD
+
+# Get revenue analytics
+curl http://localhost:8000/reports/revenue?period_start=2026-01-01&period_end=2026-06-30
 ```
 
 ## Tax Calculation
@@ -282,6 +329,63 @@ agent-invoice list --date-from 2026-01-01 --date-to 2026-06-30
 agent-invoice list --search "API" --status overdue --min-amount 100.0
 ```
 
+## Estimates & Quotes
+
+Send quotes before work begins, then convert accepted quotes into invoices:
+
+```bash
+# Create an estimate with tax and expiry
+agent-invoice estimate create "Acme Corp" \
+  --description "Website redesign" \
+  --quantity 1 \
+  --price 5000.00 \
+  --tax-rate 8.5 \
+  --expiry 30 \
+  --terms "Net 30"
+
+# Send the quote to the client
+agent-invoice estimate send EST-ABC123
+
+# Client accepts
+agent-invoice estimate accept EST-ABC123
+
+# Convert to a real invoice
+agent-invoice estimate convert EST-ABC123 --due-days 30
+
+# List all estimates by status
+agent-invoice estimate list --status accepted
+```
+
+Estimates have a full lifecycle: **draft → sent → accepted/declined → converted**. Expired quotes are auto-detected. Converted estimates link back to the invoice they became.
+
+## A/R Aging Reports
+
+Track outstanding receivables grouped by how long they've been overdue:
+
+```bash
+# Full aging report
+agent-invoice ar-aging
+
+# Filter by currency
+agent-invoice ar-aging --currency USD
+```
+
+Groups outstanding balances into standard aging buckets: **0-30, 31-60, 61-90, 90+ days**. Shows per-client breakdown with invoice-level detail (days overdue, amount remaining).
+
+## Revenue Analytics
+
+Analyze revenue trends over time:
+
+```bash
+# Last 6 months (default)
+agent-invoice revenue
+
+# Last 12 months
+agent-invoice revenue --months 12
+```
+
+Shows monthly invoicing vs. collection trends, overall collection rate (%), average days to pay, fastest/slowest payments, and top clients by revenue.
+
 ## Installation
 
 ```bash
@@ -300,14 +404,14 @@ uv pip install agent-invoice
 agent-invoice/
 ├── src/agent_invoice/
 │   ├── __init__.py
-│   ├── models.py       # Pydantic models (Invoice, Client, CreditNote, DunningConfig, etc.)
+│   ├── models.py       # Pydantic models (Invoice, Client, CreditNote, Estimate, ARAging, RevenueAnalytics, etc.)
 │   ├── store.py        # JSON file storage with numbering config
-│   ├── service.py      # Business logic layer (35+ methods)
-│   ├── cli.py          # Click CLI with 30+ commands
-│   ├── mcp_server.py   # MCP server with 35+ tools
+│   ├── service.py      # Business logic layer (50+ methods)
+│   ├── cli.py          # Click CLI with 40+ commands
+│   ├── mcp_server.py   # MCP server with 55 tools
 │   ├── api.py          # FastAPI REST API
 │   └── pdf.py          # PDF export with reportlab
-├── tests/              # 286 tests (models, store, service, CLI, API, credit notes, search, statements)
+├── tests/              # 413 tests (models, store, service, CLI, API, MCP, estimates, reports)
 └── data/               # Default storage location
 ```
 

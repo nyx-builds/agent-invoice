@@ -24,7 +24,7 @@ class TestCLI:
     def test_version(self, runner):
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.4.0" in result.output
+        assert "0.6.0" in result.output
 
     def test_client_add(self, runner, env_home):
         result = runner.invoke(main, ["client", "add", "Acme Corp", "--email", "billing@acme.com"])
@@ -466,3 +466,228 @@ class TestCurrenciesCLI:
         assert "USD" in result.output
         assert "EUR" in result.output
         assert "GBP" in result.output
+
+
+# ============================================================================
+# v0.6.0 CLI Tests — A/R Aging, Revenue Analytics, Estimates
+# ============================================================================
+
+class TestCLIEstimates:
+    def test_estimate_create(self, runner, env_home):
+        """Create a client, then an estimate."""
+        runner.invoke(main, ["client", "add", "EstCo", "--email", "e@e.com"])
+        result = runner.invoke(main, [
+            "estimate", "create", "EstCo",
+            "--description", "Dev work",
+            "--quantity", "10",
+            "--price", "100.00",
+        ])
+        assert result.exit_code == 0
+        assert "Estimate" in result.output
+        assert "created" in result.output.lower()
+        assert "EST-" in result.output
+
+    def test_estimate_create_with_tax(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "TaxEst", "--email", "t@t.com"])
+        result = runner.invoke(main, [
+            "estimate", "create", "TaxEst",
+            "--description", "Service",
+            "--price", "200.00",
+            "--tax-rate", "10.0",
+            "--discount", "50.0",
+            "--terms", "Net 30",
+        ])
+        assert result.exit_code == 0
+        assert "170" in result.output  # 200 + 20 tax - 50 discount
+
+    def test_estimate_list(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "ListEst", "--email", "l@l.com"])
+        runner.invoke(main, [
+            "estimate", "create", "ListEst",
+            "--description", "Item A",
+            "--price", "50.00",
+        ])
+        runner.invoke(main, [
+            "estimate", "create", "ListEst",
+            "--description", "Item B",
+            "--price", "75.00",
+        ])
+        result = runner.invoke(main, ["estimate", "list"])
+        assert result.exit_code == 0
+        assert "ListEst" in result.output
+        assert "50.00" in result.output
+        assert "75.00" in result.output
+
+    def test_estimate_show(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "ShowEst", "--email", "s@s.com"])
+        create_result = runner.invoke(main, [
+            "estimate", "create", "ShowEst",
+            "--description", "Test item",
+            "--price", "100.00",
+            "--notes", "Special note",
+        ])
+        # Extract estimate ID from output
+        import re
+        match = re.search(r"(EST-\w+)", create_result.output)
+        assert match is not None
+        est_id = match.group(1)
+
+        result = runner.invoke(main, ["estimate", "show", est_id])
+        assert result.exit_code == 0
+        assert "Test item" in result.output
+        assert "Special note" in result.output
+        assert "Estimate" in result.output
+
+    def test_estimate_send(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "SendEst", "--email", "s@s.com"])
+        create_result = runner.invoke(main, [
+            "estimate", "create", "SendEst",
+            "--description", "X",
+            "--price", "10.00",
+        ])
+        import re
+        est_id = re.search(r"(EST-\w+)", create_result.output).group(1)
+        result = runner.invoke(main, ["estimate", "send", est_id])
+        assert result.exit_code == 0
+        assert "sent" in result.output.lower()
+
+    def test_estimate_accept(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "AccEst", "--email", "a@a.com"])
+        create_result = runner.invoke(main, [
+            "estimate", "create", "AccEst",
+            "--description", "X",
+            "--price", "10.00",
+        ])
+        import re
+        est_id = re.search(r"(EST-\w+)", create_result.output).group(1)
+        result = runner.invoke(main, ["estimate", "accept", est_id])
+        assert result.exit_code == 0
+        assert "accepted" in result.output.lower()
+
+    def test_estimate_decline(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "DecEst", "--email", "d@d.com"])
+        create_result = runner.invoke(main, [
+            "estimate", "create", "DecEst",
+            "--description", "X",
+            "--price", "10.00",
+        ])
+        import re
+        est_id = re.search(r"(EST-\w+)", create_result.output).group(1)
+        result = runner.invoke(main, ["estimate", "decline", est_id])
+        assert result.exit_code == 0
+        assert "declined" in result.output.lower()
+
+    def test_estimate_convert(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "ConvEst", "--email", "c@c.com"])
+        create_result = runner.invoke(main, [
+            "estimate", "create", "ConvEst",
+            "--description", "Big job",
+            "--quantity", "5",
+            "--price", "200.00",
+        ])
+        import re
+        est_id = re.search(r"(EST-\w+)", create_result.output).group(1)
+        result = runner.invoke(main, ["estimate", "convert", est_id, "--due-days", "30"])
+        assert result.exit_code == 0
+        assert "converted" in result.output.lower()
+        assert "Invoice" in result.output
+
+    def test_estimate_delete(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "DelEst", "--email", "d@d.com"])
+        create_result = runner.invoke(main, [
+            "estimate", "create", "DelEst",
+            "--description", "X",
+            "--price", "10.00",
+        ])
+        import re
+        est_id = re.search(r"(EST-\w+)", create_result.output).group(1)
+        result = runner.invoke(main, ["estimate", "delete", est_id])
+        assert result.exit_code == 0
+        assert "deleted" in result.output.lower()
+        # Verify it's gone
+        result = runner.invoke(main, ["estimate", "show", est_id])
+        assert result.exit_code == 1
+
+    def test_estimate_full_lifecycle(self, runner, env_home):
+        """Full estimate lifecycle: create → send → accept → convert."""
+        runner.invoke(main, ["client", "add", "LifeCo", "--email", "l@l.com"])
+        create = runner.invoke(main, [
+            "estimate", "create", "LifeCo",
+            "--description", "Project",
+            "--quantity", "10",
+            "--price", "250.00",
+        ])
+        import re
+        est_id = re.search(r"(EST-\w+)", create.output).group(1)
+
+        # Send
+        assert runner.invoke(main, ["estimate", "send", est_id]).exit_code == 0
+        # Accept
+        assert runner.invoke(main, ["estimate", "accept", est_id]).exit_code == 0
+        # Convert
+        convert_result = runner.invoke(main, ["estimate", "convert", est_id])
+        assert convert_result.exit_code == 0
+        assert "converted" in convert_result.output.lower()
+        # Should contain an invoice ID
+        assert "INV-" in convert_result.output or re.search(r"\d", convert_result.output)
+
+
+class TestCLIARAging:
+    def test_ar_aging_empty(self, runner, env_home):
+        """AR aging report with no outstanding invoices."""
+        result = runner.invoke(main, ["ar-aging"])
+        assert result.exit_code == 0
+        assert "A/R Aging Report" in result.output
+
+    def test_ar_aging_with_outstanding(self, runner, env_home):
+        """AR aging report with an outstanding invoice."""
+        runner.invoke(main, ["client", "add", "AgingCo", "--email", "a@a.com"])
+        runner.invoke(main, [
+            "create", "--client", "AgingCo",
+            "--item", "Work,10,100.00",
+            "--due", "30",
+        ])
+        result = runner.invoke(main, ["ar-aging"])
+        assert result.exit_code == 0
+        assert "A/R Aging Report" in result.output
+        assert "AgingCo" in result.output
+
+    def test_ar_aging_with_currency(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "CurAging", "--email", "c@c.com"])
+        runner.invoke(main, [
+            "create", "--client", "CurAging",
+            "--item", "Work,1,100.00",
+        ])
+        result = runner.invoke(main, ["ar-aging", "--currency", "USD"])
+        assert result.exit_code == 0
+        assert "USD" in result.output
+
+
+class TestCLIRevenue:
+    def test_revenue_no_data(self, runner, env_home):
+        """Revenue analytics with no invoices."""
+        result = runner.invoke(main, ["revenue"])
+        assert result.exit_code == 0
+        assert "Revenue Analytics" in result.output
+
+    def test_revenue_with_data(self, runner, env_home):
+        """Revenue analytics with invoice data."""
+        runner.invoke(main, ["client", "add", "RevCo", "--email", "r@r.com"])
+        runner.invoke(main, [
+            "create", "--client", "RevCo",
+            "--item", "Service,5,200.00",
+        ])
+        result = runner.invoke(main, ["revenue", "--months", "3"])
+        assert result.exit_code == 0
+        assert "Revenue Analytics" in result.output
+        assert "1000" in result.output  # 5 * 200
+
+    def test_revenue_custom_months(self, runner, env_home):
+        runner.invoke(main, ["client", "add", "MonthCo", "--email", "m@m.com"])
+        runner.invoke(main, [
+            "create", "--client", "MonthCo",
+            "--item", "Service,1,500.00",
+        ])
+        result = runner.invoke(main, ["revenue", "--months", "12"])
+        assert result.exit_code == 0
+        assert "Revenue Analytics" in result.output

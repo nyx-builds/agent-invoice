@@ -944,6 +944,160 @@ async def list_tools() -> list[Tool]:
                 "required": ["credit_id"],
             },
         ),
+        # --- A/R Aging ---
+        Tool(
+            name="generate_ar_aging_report",
+            description="Generate an A/R (Accounts Receivable) aging report. Groups outstanding invoice balances into aging buckets (0-30, 31-60, 61-90, 90+ days) to help identify which clients are late paying and by how much.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "currency": {
+                        "type": "string",
+                        "description": "Filter by currency code (e.g. USD, EUR). Omit for all currencies.",
+                    },
+                },
+            },
+        ),
+        # --- Revenue Analytics ---
+        Tool(
+            name="get_revenue_analytics",
+            description="Generate revenue analytics for a period. Includes monthly invoicing/collection trends, collection rate (%), average days to pay, fastest/slowest payments, and top clients by revenue.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period_start": {
+                        "type": "string",
+                        "description": "Period start date (YYYY-MM-DD)",
+                    },
+                    "period_end": {
+                        "type": "string",
+                        "description": "Period end date (YYYY-MM-DD)",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Filter by currency. Omit for default.",
+                    },
+                },
+                "required": ["period_start", "period_end"],
+            },
+        ),
+        # --- Estimates ---
+        Tool(
+            name="create_estimate",
+            description="Create a new estimate/quote for a client. Estimates can be sent, accepted/declined, and converted into invoices once accepted.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {
+                        "type": "string",
+                        "description": "Client ID or name",
+                    },
+                    "line_items": {
+                        "type": "array",
+                        "description": "List of line items for the estimate",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "unit_price": {"type": "number"},
+                                "tax_rate": {"type": "number"},
+                            },
+                            "required": ["description", "unit_price"],
+                        },
+                    },
+                    "currency": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "terms": {"type": "string", "description": "Payment terms or scope description"},
+                    "expiry_days": {"type": "integer", "description": "Days until quote expires (default 30)"},
+                    "tax_rate": {"type": "number"},
+                    "discount_amount": {"type": "number"},
+                },
+                "required": ["client", "line_items"],
+            },
+        ),
+        Tool(
+            name="list_estimates",
+            description="List estimates/quotes with optional filters by status or client.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["draft", "sent", "accepted", "declined", "expired", "converted"],
+                        "description": "Filter by status",
+                    },
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                },
+            },
+        ),
+        Tool(
+            name="get_estimate",
+            description="Get details of a specific estimate by ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string", "description": "The estimate ID"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
+        Tool(
+            name="send_estimate",
+            description="Mark an estimate as sent to the client.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string", "description": "The estimate ID"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
+        Tool(
+            name="accept_estimate",
+            description="Mark an estimate as accepted by the client.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string", "description": "The estimate ID"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
+        Tool(
+            name="decline_estimate",
+            description="Mark an estimate as declined by the client.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string", "description": "The estimate ID"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
+        Tool(
+            name="convert_estimate_to_invoice",
+            description="Convert an estimate into an invoice. The estimate must be in draft, sent, or accepted status. Creates a new invoice and marks the estimate as converted.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string", "description": "The estimate ID"},
+                    "due_days": {"type": "integer", "description": "Days until due date for the new invoice (default 30)"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
+        Tool(
+            name="remove_estimate",
+            description="Remove an estimate. Cannot remove converted estimates.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string", "description": "The estimate ID"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
     ]
 
 
@@ -1599,6 +1753,123 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 currency=arguments.get("currency"),
             )
             return _json_result(statement.model_dump(mode="json"))
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "generate_ar_aging_report":
+        try:
+            report = svc.generate_ar_aging_report(currency=arguments.get("currency"))
+            return _json_result(report.model_dump(mode="json"))
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "get_revenue_analytics":
+        from datetime import date as date_type
+        try:
+            period_start = date_type.fromisoformat(arguments["period_start"])
+            period_end = date_type.fromisoformat(arguments["period_end"])
+        except ValueError:
+            return _text_result("Error: Invalid date format. Use YYYY-MM-DD.")
+        try:
+            analytics = svc.get_revenue_analytics(period_start, period_end, currency=arguments.get("currency"))
+            return _json_result(analytics.model_dump(mode="json"))
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "create_estimate":
+        try:
+            estimate = svc.create_estimate(
+                client_identifier=arguments["client"],
+                line_items=arguments["line_items"],
+                currency=arguments.get("currency"),
+                notes=arguments.get("notes"),
+                terms=arguments.get("terms"),
+                expiry_days=arguments.get("expiry_days", 30),
+                tax_rate=arguments.get("tax_rate"),
+                discount_amount=arguments.get("discount_amount"),
+            )
+            return _json_result({
+                "id": estimate.id,
+                "client": estimate.client_name,
+                "status": estimate.status.value,
+                "currency": estimate.currency,
+                "subtotal": estimate.subtotal,
+                "tax": estimate.total_tax,
+                "discount": estimate.discount_amount,
+                "total": estimate.total,
+                "expiry_date": str(estimate.expiry_date) if estimate.expiry_date else None,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_estimates":
+        try:
+            estimates = svc.list_estimates(status=arguments.get("status"), client=arguments.get("client"))
+            return _json_result([
+                {
+                    "id": e.id,
+                    "client": e.client_name or e.client_id,
+                    "status": e.status.value,
+                    "currency": e.currency,
+                    "total": e.total,
+                    "issue_date": str(e.issue_date),
+                    "expiry_date": str(e.expiry_date) if e.expiry_date else None,
+                    "converted_invoice_id": e.converted_invoice_id,
+                }
+                for e in estimates
+            ])
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "get_estimate":
+        est = svc.get_estimate(arguments["estimate_id"])
+        if not est:
+            return _text_result(f"Estimate '{arguments['estimate_id']}' not found")
+        return _json_result(est.model_dump(mode="json"))
+
+    elif name == "send_estimate":
+        try:
+            est = svc.send_estimate(arguments["estimate_id"])
+            return _json_result({"id": est.id, "status": est.status.value})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "accept_estimate":
+        try:
+            est = svc.accept_estimate(arguments["estimate_id"])
+            return _json_result({"id": est.id, "status": est.status.value})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "decline_estimate":
+        try:
+            est = svc.decline_estimate(arguments["estimate_id"])
+            return _json_result({"id": est.id, "status": est.status.value})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "convert_estimate_to_invoice":
+        try:
+            est, inv = svc.convert_estimate_to_invoice(
+                arguments["estimate_id"],
+                due_days=arguments.get("due_days", 30),
+            )
+            return _json_result({
+                "estimate_id": est.id,
+                "estimate_status": est.status.value,
+                "invoice_id": inv.id,
+                "invoice_total": inv.total,
+                "invoice_currency": inv.currency,
+                "invoice_due_date": str(inv.due_date) if inv.due_date else None,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_estimate":
+        try:
+            if svc.remove_estimate(arguments["estimate_id"]):
+                return _text_result(f"Estimate '{arguments['estimate_id']}' removed.")
+            return _text_result(f"Estimate '{arguments['estimate_id']}' not found.")
         except ValueError as e:
             return _text_result(f"Error: {e}")
 

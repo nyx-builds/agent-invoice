@@ -43,9 +43,9 @@ def setup_client_and_invoice(svc, name="Test Corp", currency="USD"):
 
 
 class TestMCPToolCount:
-    def test_has_45_tools(self):
+    def test_has_55_tools(self):
         tools = _run(list_tools())
-        assert len(tools) == 45
+        assert len(tools) == 55
 
     def test_all_tools_have_required_fields(self):
         tools = _run(list_tools())

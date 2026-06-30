@@ -152,7 +152,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Agent Invoice API",
         description="REST API for autonomous agent billing — create invoices, manage clients, track payments, dunning, templates",
-        version="0.5.0",
+        version="0.6.0",
     )
 
     # --- Clients ---
@@ -769,6 +769,157 @@ def create_app() -> FastAPI:
                 currency=currency,
             )
             return stmt.model_dump(mode="json")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # --- A/R Aging Report ---
+
+    @app.get("/reports/ar-aging", tags=["Reports"])
+    def ar_aging_report(currency: Optional[str] = Query(None)):
+        """Generate an A/R aging report grouping outstanding balances by age."""
+        svc = _get_service()
+        report = svc.generate_ar_aging_report(currency=currency)
+        return report.model_dump(mode="json")
+
+    # --- Revenue Analytics ---
+
+    @app.get("/reports/revenue", tags=["Reports"])
+    def revenue_report(
+        period_start: str = Query(..., description="YYYY-MM-DD"),
+        period_end: str = Query(..., description="YYYY-MM-DD"),
+        currency: Optional[str] = Query(None),
+    ):
+        """Generate revenue analytics for a period."""
+        from datetime import date as date_type
+        svc = _get_service()
+        try:
+            start = date_type.fromisoformat(period_start)
+            end = date_type.fromisoformat(period_end)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        try:
+            analytics = svc.get_revenue_analytics(start, end, currency=currency)
+            return analytics.model_dump(mode="json")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # --- Estimates ---
+
+    def _estimate_response(est) -> dict:
+        """Serialize an estimate to dict, including computed properties."""
+        data = est.model_dump(mode="json")
+        data["subtotal"] = est.subtotal
+        data["total_tax"] = est.total_tax
+        data["total"] = est.total
+        return data
+
+    @app.post("/estimates", tags=["Estimates"])
+    def create_estimate(req: dict):
+        """Create a new estimate/quote.
+
+        Body fields: client (required), line_items (required), currency, notes,
+        terms, expiry_days, tax_rate, discount_amount.
+        """
+        svc = _get_service()
+        try:
+            line_items = req.pop("line_items", [])
+            client_identifier = req.pop("client", None)
+            if not client_identifier:
+                raise ValueError("Field 'client' is required.")
+            estimate = svc.create_estimate(
+                client_identifier=client_identifier,
+                line_items=line_items,
+                currency=req.get("currency"),
+                notes=req.get("notes"),
+                terms=req.get("terms"),
+                expiry_days=req.get("expiry_days", 30),
+                tax_rate=req.get("tax_rate"),
+                discount_amount=req.get("discount_amount"),
+            )
+            return _estimate_response(estimate)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/estimates", tags=["Estimates"])
+    def list_estimates(
+        status: Optional[str] = Query(None),
+        client: Optional[str] = Query(None),
+    ):
+        """List estimates with optional filters."""
+        svc = _get_service()
+        try:
+            estimates = svc.list_estimates(status=status, client=client)
+            return [_estimate_response(e) for e in estimates]
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/estimates/{estimate_id}", tags=["Estimates"])
+    def get_estimate(estimate_id: str):
+        """Get an estimate by ID."""
+        svc = _get_service()
+        est = svc.get_estimate(estimate_id)
+        if not est:
+            raise HTTPException(status_code=404, detail=f"Estimate '{estimate_id}' not found")
+        return _estimate_response(est)
+
+    @app.post("/estimates/{estimate_id}/send", tags=["Estimates"])
+    def send_estimate(estimate_id: str):
+        """Mark an estimate as sent."""
+        svc = _get_service()
+        try:
+            est = svc.send_estimate(estimate_id)
+            return _estimate_response(est)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/estimates/{estimate_id}/accept", tags=["Estimates"])
+    def accept_estimate(estimate_id: str):
+        """Mark an estimate as accepted."""
+        svc = _get_service()
+        try:
+            est = svc.accept_estimate(estimate_id)
+            return _estimate_response(est)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/estimates/{estimate_id}/decline", tags=["Estimates"])
+    def decline_estimate(estimate_id: str):
+        """Mark an estimate as declined."""
+        svc = _get_service()
+        try:
+            est = svc.decline_estimate(estimate_id)
+            return _estimate_response(est)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/estimates/{estimate_id}/convert", tags=["Estimates"])
+    def convert_estimate(estimate_id: str, due_days: int = Query(30)):
+        """Convert an estimate into an invoice."""
+        svc = _get_service()
+        try:
+            est, inv = svc.convert_estimate_to_invoice(estimate_id, due_days=due_days)
+            inv_data = inv.model_dump(mode="json")
+            # Include computed totals that are properties, not fields
+            inv_data["subtotal"] = inv.subtotal
+            inv_data["total_tax"] = inv.total_tax
+            inv_data["total"] = inv.total
+            inv_data["amount_paid"] = inv.amount_paid
+            inv_data["amount_remaining"] = inv.amount_remaining
+            return {
+                "estimate": _estimate_response(est),
+                "invoice": inv_data,
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.delete("/estimates/{estimate_id}", tags=["Estimates"])
+    def delete_estimate(estimate_id: str):
+        """Delete an estimate."""
+        svc = _get_service()
+        try:
+            if svc.remove_estimate(estimate_id):
+                return {"deleted": True}
+            raise HTTPException(status_code=404, detail=f"Estimate '{estimate_id}' not found")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 

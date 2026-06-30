@@ -12,6 +12,7 @@ from rich.table import Table
 from .models import CURRENCIES, BUILTIN_TEMPLATES, DunningLevel, InvoiceStatus, RecurrenceFrequency, format_amount, get_currency_symbol
 from .service import InvoiceService
 from .store import InvoiceStore
+from . import __version__
 
 console = Console()
 
@@ -21,7 +22,7 @@ def get_service() -> InvoiceService:
 
 
 @click.group()
-@click.version_option()
+@click.version_option(__version__)
 def main():
     """Agent Invoice — Billing for autonomous agents."""
     pass
@@ -1269,6 +1270,266 @@ def client_statement(client: str, date_from_str: str, date_to_str: str, currency
         console.print(f"\n  [bold]Credit Notes ({len(stmt.credit_notes)}):[/bold]")
         for cn in stmt.credit_notes:
             console.print(f"    {cn['id']} — {cn['date']} — {sym}{cn['amount']:.2f} — {cn.get('reason', '—')}")
+
+
+# --- A/R Aging Report ---
+
+@main.command("ar-aging")
+@click.option("--currency", default=None, help="Filter by currency")
+def ar_aging(currency):
+    """Show A/R (Accounts Receivable) aging report.
+
+    Groups outstanding invoice balances into aging buckets:
+    0-30, 31-60, 61-90, and 90+ days past due.
+    """
+    svc = get_service()
+    report = svc.generate_ar_aging_report(currency=currency)
+
+    console.print(f"\n[bold]A/R Aging Report — As of {report.as_of_date}[/bold]")
+    if report.currency:
+        console.print(f"  Currency: {report.currency}")
+    console.print(f"  Total Outstanding: {report.total_outstanding:.2f}")
+    console.print(f"  Clients with Balances: {report.client_count}")
+
+    if not report.clients:
+        console.print("\n  [green]No outstanding balances. All caught up![/green]")
+        return
+
+    # Summary table
+    console.print(f"\n[bold]Aging Buckets (Totals):[/bold]")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Bucket")
+    table.add_column("Invoices", justify="right")
+    table.add_column("Outstanding", justify="right")
+    for b in report.bucket_totals:
+        table.add_row(b.label, str(b.invoice_count), f"{b.total_outstanding:.2f}")
+    console.print(table)
+
+    # Per-client detail
+    console.print(f"\n[bold]By Client:[/bold]")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Client")
+    table.add_column("Total", justify="right")
+    for b in report.bucket_totals:
+        table.add_column(b.label, justify="right")
+    table.add_column("Details", justify="left")
+    for c in report.clients:
+        # Build bucket amounts map
+        bucket_amounts = {b.label: b.total_outstanding for b in c.buckets}
+        details = ", ".join(f"{d['id']} ({d['days_overdue']}d)" for d in c.invoice_details[:3])
+        if len(c.invoice_details) > 3:
+            details += f" +{len(c.invoice_details) - 3} more"
+        row = [c.client_name or c.client_id, f"{c.total_outstanding:.2f}"]
+        for b in report.bucket_totals:
+            amt = bucket_amounts.get(b.label, 0.0)
+            row.append(f"{amt:.2f}" if amt > 0 else "—")
+        row.append(details)
+        table.add_row(*row)
+    console.print(table)
+
+
+# --- Revenue Analytics ---
+
+@main.command("revenue")
+@click.option("--months", type=int, default=6, help="Number of months to analyze (default: 6)")
+@click.option("--currency", default=None, help="Filter by currency")
+def revenue_analytics(months: int, currency: str):
+    """Show revenue analytics for the last N months.
+
+    Displays monthly revenue trends, collection rate, average days to pay,
+    and top clients.
+    """
+    from datetime import date, timedelta
+
+    svc = get_service()
+    today = date.today()
+    # Compute start date: first day of the month N-1 months ago (pure stdlib)
+    start_month = today.month - (months - 1)
+    start_year = today.year
+    while start_month <= 0:
+        start_month += 12
+        start_year -= 1
+    start = date(start_year, start_month, 1)
+
+    analytics = svc.get_revenue_analytics(start, today, currency=currency)
+
+    console.print(f"\n[bold]Revenue Analytics — {analytics.period_start} to {analytics.period_end}[/bold]")
+    console.print(f"  Currency: {analytics.currency}")
+    console.print(f"  Total Invoiced:  {analytics.total_invoiced:.2f}")
+    console.print(f"  Total Collected: {analytics.total_collected:.2f}")
+    console.print(f"  Collection Rate: {analytics.collection_rate:.1f}%")
+    console.print(f"  Avg Days to Pay: {analytics.avg_days_to_pay:.1f}")
+    if analytics.fastest_payment_days is not None:
+        console.print(f"  Fastest Payment: {analytics.fastest_payment_days} days")
+        console.print(f"  Slowest Payment: {analytics.slowest_payment_days} days")
+
+    if analytics.months:
+        console.print(f"\n[bold]Monthly Breakdown:[/bold]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Month")
+        table.add_column("Invoiced", justify="right")
+        table.add_column("Collected", justify="right")
+        table.add_column("Outstanding", justify="right")
+        table.add_column("Invoices", justify="right")
+        table.add_column("Paid", justify="right")
+        for m in analytics.months:
+            table.add_row(
+                m.period,
+                f"{m.invoiced:.2f}",
+                f"{m.collected:.2f}",
+                f"{m.outstanding:.2f}",
+                str(m.invoice_count),
+                str(m.paid_invoice_count),
+            )
+        console.print(table)
+
+    if analytics.top_clients:
+        console.print(f"\n[bold]Top Clients:[/bold]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Client")
+        table.add_column("Invoiced", justify="right")
+        table.add_column("Paid", justify="right")
+        for tc in analytics.top_clients[:5]:
+            table.add_row(
+                tc.get("client_name", tc.get("client_id", "?")),
+                f"{tc['total_invoiced']:.2f}",
+                f"{tc['total_paid']:.2f}",
+            )
+        console.print(table)
+
+
+# --- Estimates ---
+
+@main.group("estimate")
+def estimate_group():
+    """Manage estimates and quotes."""
+    pass
+
+
+@estimate_group.command("create")
+@click.argument("client")
+@click.option("--description", required=True, help="Description of the line item")
+@click.option("--quantity", type=float, default=1.0, help="Quantity")
+@click.option("--price", type=float, required=True, help="Unit price")
+@click.option("--currency", default=None, help="Currency (default: client's)")
+@click.option("--notes", default=None, help="Notes")
+@click.option("--terms", default=None, help="Terms or scope description")
+@click.option("--expiry", type=int, default=30, help="Days until expiry (default: 30)")
+@click.option("--tax-rate", type=float, default=None, help="Tax rate %")
+@click.option("--discount", type=float, default=None, help="Discount amount")
+def estimate_create(client, description, quantity, price, currency, notes, terms, expiry, tax_rate, discount):
+    """Create a new estimate/quote for a client."""
+    svc = get_service()
+    line_items = [{"description": description, "quantity": quantity, "unit_price": price, "tax_rate": tax_rate or 0}]
+    estimate = svc.create_estimate(
+        client_identifier=client,
+        line_items=line_items,
+        currency=currency,
+        notes=notes,
+        terms=terms,
+        expiry_days=expiry,
+        tax_rate=tax_rate,
+        discount_amount=discount,
+    )
+    sym = get_currency_symbol(estimate.currency)
+    console.print(f"[green]✓ Estimate {estimate.id} created[/green]")
+    console.print(f"  Client:   {estimate.client_name or estimate.client_id}")
+    console.print(f"  Status:   {estimate.status.value}")
+    console.print(f"  Total:    {sym}{estimate.total:.2f}")
+    console.print(f"  Expires:  {estimate.expiry_date}")
+
+
+@estimate_group.command("list")
+@click.option("--status", default=None, help="Filter by status (draft, sent, accepted, declined, expired, converted)")
+@click.option("--client", default=None, help="Filter by client")
+def estimate_list(status, client):
+    """List estimates."""
+    svc = get_service()
+    estimates = svc.list_estimates(status=status, client=client)
+    if not estimates:
+        console.print("[yellow]No estimates found.[/yellow]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("ID")
+    table.add_column("Client")
+    table.add_column("Status")
+    table.add_column("Total", justify="right")
+    table.add_column("Issue Date")
+    table.add_column("Expires")
+    for est in estimates:
+        sym = get_currency_symbol(est.currency)
+        table.add_row(
+            est.id,
+            est.client_name or est.client_id,
+            est.status.value,
+            f"{sym}{est.total:.2f}",
+            str(est.issue_date),
+            str(est.expiry_date) if est.expiry_date else "—",
+        )
+    console.print(table)
+
+
+@estimate_group.command("show")
+@click.argument("estimate_id")
+def estimate_show(estimate_id):
+    """Show estimate details."""
+    svc = get_service()
+    est = svc.get_estimate(estimate_id)
+    if not est:
+        console.print(f"[red]Estimate '{estimate_id}' not found.[/red]")
+        sys.exit(1)
+    console.print(est.to_markdown())
+
+
+@estimate_group.command("send")
+@click.argument("estimate_id")
+def estimate_send(estimate_id):
+    """Mark an estimate as sent."""
+    svc = get_service()
+    est = svc.send_estimate(estimate_id)
+    console.print(f"[green]✓ Estimate {est.id} marked as sent.[/green]")
+
+
+@estimate_group.command("accept")
+@click.argument("estimate_id")
+def estimate_accept(estimate_id):
+    """Mark an estimate as accepted."""
+    svc = get_service()
+    est = svc.accept_estimate(estimate_id)
+    console.print(f"[green]✓ Estimate {est.id} accepted.[/green]")
+
+
+@estimate_group.command("decline")
+@click.argument("estimate_id")
+def estimate_decline(estimate_id):
+    """Mark an estimate as declined."""
+    svc = get_service()
+    est = svc.decline_estimate(estimate_id)
+    console.print(f"[yellow]✓ Estimate {est.id} declined.[/yellow]")
+
+
+@estimate_group.command("convert")
+@click.argument("estimate_id")
+@click.option("--due-days", type=int, default=30, help="Days until due for the new invoice")
+def estimate_convert(estimate_id, due_days):
+    """Convert an estimate to an invoice."""
+    svc = get_service()
+    est, inv = svc.convert_estimate_to_invoice(estimate_id, due_days=due_days)
+    console.print(f"[green]✓ Estimate {est.id} converted to Invoice {inv.id}[/green]")
+    console.print(f"  Invoice Total: {inv.currency} {inv.total:.2f}")
+    console.print(f"  Due Date:      {inv.due_date}")
+
+
+@estimate_group.command("delete")
+@click.argument("estimate_id")
+def estimate_delete(estimate_id):
+    """Delete an estimate."""
+    svc = get_service()
+    if svc.remove_estimate(estimate_id):
+        console.print(f"[green]✓ Estimate {estimate_id} deleted.[/green]")
+    else:
+        console.print(f"[red]Estimate '{estimate_id}' not found.[/red]")
+        sys.exit(1)
 
 
 # --- REST API serve ---

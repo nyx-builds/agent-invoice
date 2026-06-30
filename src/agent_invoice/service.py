@@ -6,9 +6,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from .models import (
-    CURRENCIES,
+    ARAgingBucket,
+    ARAgingReport,
     BUILTIN_TEMPLATES,
+    CURRENCIES,
     Client,
+    ClientARAging,
     ClientStatement,
     CreditNote,
     CreditNoteStatus,
@@ -16,14 +19,18 @@ from .models import (
     DunningConfig,
     DunningLevel,
     EarningsSummary,
+    Estimate,
+    EstimateStatus,
     Invoice,
     InvoiceStatus,
     InvoiceTemplate,
     LineItem,
+    MonthlyRevenue,
     NumberingConfig,
     Payment,
     RecurrenceFrequency,
     RecurringInvoice,
+    RevenueAnalytics,
     format_amount,
 )
 from .store import InvoiceStore
@@ -1140,3 +1147,452 @@ class InvoiceService:
             closing_balance=closing_balance,
         )
         return statement
+
+    # -----------------------------------------------------------------------
+    # A/R Aging Report
+    # -----------------------------------------------------------------------
+
+    def generate_ar_aging_report(
+        self,
+        currency: Optional[str] = None,
+        bucket_ranges: Optional[list[tuple[int, Optional[int]]]] = None,
+    ) -> ARAgingReport:
+        """Generate an Accounts Receivable aging report.
+
+        Groups outstanding invoice balances into aging buckets
+        (0-30, 31-60, 61-90, 90+ days by default).
+
+        Args:
+            currency: Filter by currency (None = all currencies).
+            bucket_ranges: Custom bucket ranges as (low, high) tuples.
+                high=None means open-ended. Default: 0-30, 31-60, 61-90, 90+.
+
+        Returns:
+            ARAgingReport with per-client and per-bucket breakdowns.
+        """
+        if bucket_ranges is None:
+            bucket_ranges = [(0, 30), (31, 60), (61, 90), (91, None)]
+
+        today = date.today()
+
+        # Gather all invoices with outstanding balances
+        invoices = self.store.list_invoices(currency=currency)
+        # Include partially_paid and overdue invoices that have remaining balance
+        outstanding = [inv for inv in invoices if inv.amount_remaining > 0.01]
+
+        # Group by client
+        client_map: dict[str, list[Invoice]] = {}
+        for inv in outstanding:
+            client_map.setdefault(inv.client_id, []).append(inv)
+
+        # Build per-client aging
+        client_agings: list[ClientARAging] = []
+        grand_bucket_totals: dict[str, ARAgingBucket] = {}
+
+        for client_id, invs in sorted(client_map.items()):
+            # Get client name
+            client_name = None
+            client_obj = self.store.get_client(client_id)
+            if not client_obj:
+                # Try finding by name in case client_id is actually a name
+                client_obj = self.store.find_client_by_name(client_id)
+            if client_obj:
+                client_name = client_obj.name
+
+            # Initialize buckets for this client
+            client_buckets: dict[str, ARAgingBucket] = {}
+            for low, high in bucket_ranges:
+                label = f"{low}-{high}" if high is not None else f"{low}+"
+                client_buckets[label] = ARAgingBucket(label=label, days_low=low, days_high=high)
+                grand_bucket_totals.setdefault(label, ARAgingBucket(label=label, days_low=low, days_high=high))
+
+            client_total = 0.0
+            invoice_details = []
+
+            for inv in invs:
+                # Calculate days past due
+                if inv.due_date:
+                    days_overdue = (today - inv.due_date).days
+                else:
+                    # No due date — age from issue date
+                    days_overdue = (today - inv.issue_date).days
+
+                # Only count as overdue if positive
+                days_overdue = max(0, days_overdue)
+
+                remaining = inv.amount_remaining
+                client_total += remaining
+
+                # Find which bucket this falls into
+                bucket_label = None
+                for low, high in bucket_ranges:
+                    if high is None:
+                        if days_overdue >= low:
+                            bucket_label = f"{low}-{high}" if high is not None else f"{low}+"
+                            break
+                    elif low <= days_overdue <= high:
+                        bucket_label = f"{low}-{high}"
+                        break
+
+                if bucket_label and bucket_label in client_buckets:
+                    client_buckets[bucket_label].invoice_count += 1
+                    client_buckets[bucket_label].total_outstanding += remaining
+                    grand_bucket_totals[bucket_label].invoice_count += 1
+                    grand_bucket_totals[bucket_label].total_outstanding += remaining
+
+                invoice_details.append({
+                    "id": inv.id,
+                    "total": inv.total,
+                    "amount_remaining": remaining,
+                    "days_overdue": days_overdue,
+                    "bucket": bucket_label,
+                    "due_date": str(inv.due_date) if inv.due_date else None,
+                    "issue_date": str(inv.issue_date),
+                    "status": inv.status.value,
+                })
+
+            client_agings.append(ClientARAging(
+                client_id=client_id,
+                client_name=client_name,
+                total_outstanding=round(client_total, 2),
+                buckets=list(client_buckets.values()),
+                invoice_details=invoice_details,
+            ))
+
+        # Sort clients by total_outstanding descending
+        client_agings.sort(key=lambda c: c.total_outstanding, reverse=True)
+
+        grand_total = sum(c.total_outstanding for c in client_agings)
+
+        return ARAgingReport(
+            as_of_date=today,
+            currency=currency,
+            total_outstanding=round(grand_total, 2),
+            client_count=len(client_agings),
+            bucket_totals=list(grand_bucket_totals.values()),
+            clients=client_agings,
+        )
+
+    # -----------------------------------------------------------------------
+    # Revenue Analytics
+    # -----------------------------------------------------------------------
+
+    def get_revenue_analytics(
+        self,
+        period_start: date,
+        period_end: date,
+        currency: Optional[str] = None,
+    ) -> RevenueAnalytics:
+        """Generate revenue analytics for a period.
+
+        Includes monthly breakdown, collection rate, average days to pay,
+        and top clients.
+
+        Args:
+            period_start: Start of the analytics period.
+            period_end: End of the analytics period.
+            currency: Filter by currency (default: USD for reporting).
+
+        Returns:
+            RevenueAnalytics with monthly trends and metrics.
+        """
+        if period_start > period_end:
+            raise ValueError("period_start must be before or equal to period_end.")
+
+        analytics_currency = currency.upper() if currency else "USD"
+
+        invoices = self.store.list_invoices(currency=currency)
+
+        # Filter invoices to those issued within the period
+        period_invoices = [inv for inv in invoices if period_start <= inv.issue_date <= period_end]
+
+        # Build monthly breakdown
+        months_data: dict[str, dict] = {}
+        for inv in period_invoices:
+            month_key = inv.issue_date.strftime("%Y-%m")
+            if month_key not in months_data:
+                months_data[month_key] = {
+                    "invoiced": 0.0,
+                    "collected": 0.0,
+                    "outstanding": 0.0,
+                    "invoice_count": 0,
+                    "paid_invoice_count": 0,
+                }
+            months_data[month_key]["invoiced"] += inv.total
+            months_data[month_key]["invoice_count"] += 1
+            months_data[month_key]["collected"] += inv.amount_paid
+            months_data[month_key]["outstanding"] += inv.amount_remaining
+            if inv.status == InvoiceStatus.PAID:
+                months_data[month_key]["paid_invoice_count"] += 1
+
+        # Collect payments received during the period (for collection timing)
+        # and add them to the respective months
+        for inv in invoices:
+            for p in inv.payments:
+                if period_start <= p.payment_date <= period_end:
+                    month_key = p.payment_date.strftime("%Y-%m")
+                    if month_key not in months_data:
+                        months_data[month_key] = {
+                            "invoiced": 0.0,
+                            "collected": 0.0,
+                            "outstanding": 0.0,
+                            "invoice_count": 0,
+                            "paid_invoice_count": 0,
+                        }
+                    months_data[month_key]["collected"] += p.amount
+
+        # Build MonthlyRevenue objects
+        months = []
+        for month_key in sorted(months_data.keys()):
+            data = months_data[month_key]
+            avg_inv_val = round(data["invoiced"] / data["invoice_count"], 2) if data["invoice_count"] > 0 else 0.0
+            months.append(MonthlyRevenue(
+                period=month_key,
+                invoiced=round(data["invoiced"], 2),
+                collected=round(data["collected"], 2),
+                outstanding=round(data["outstanding"], 2),
+                invoice_count=data["invoice_count"],
+                paid_invoice_count=data["paid_invoice_count"],
+                avg_invoice_value=avg_inv_val,
+            ))
+
+        total_invoiced = sum(m.invoiced for m in months)
+        total_collected = sum(m.collected for m in months)
+
+        # Calculate average days to pay (from issue to paid_date)
+        days_to_pay = []
+        for inv in invoices:
+            if inv.status == InvoiceStatus.PAID and inv.paid_date and period_start <= inv.paid_date <= period_end:
+                days = (inv.paid_date - inv.issue_date).days
+                if days >= 0:
+                    days_to_pay.append(days)
+
+        avg_days_to_pay = round(sum(days_to_pay) / len(days_to_pay), 1) if days_to_pay else 0.0
+        fastest = min(days_to_pay) if days_to_pay else None
+        slowest = max(days_to_pay) if days_to_pay else None
+
+        collection_rate = round(total_collected / total_invoiced * 100, 1) if total_invoiced > 0 else 0.0
+
+        # Top clients by total invoiced
+        client_totals: dict[str, dict] = {}
+        for inv in period_invoices:
+            cid = inv.client_id
+            if cid not in client_totals:
+                client_totals[cid] = {
+                    "client_id": cid,
+                    "client_name": inv.client_name or cid,
+                    "total_invoiced": 0.0,
+                    "total_paid": 0.0,
+                }
+            client_totals[cid]["total_invoiced"] += inv.total
+            client_totals[cid]["total_paid"] += inv.amount_paid
+
+        top_clients = sorted(client_totals.values(), key=lambda x: x["total_invoiced"], reverse=True)[:10]
+        for tc in top_clients:
+            tc["total_invoiced"] = round(tc["total_invoiced"], 2)
+            tc["total_paid"] = round(tc["total_paid"], 2)
+
+        return RevenueAnalytics(
+            currency=analytics_currency,
+            period_start=str(period_start),
+            period_end=str(period_end),
+            months=months,
+            total_invoiced=round(total_invoiced, 2),
+            total_collected=round(total_collected, 2),
+            avg_days_to_pay=avg_days_to_pay,
+            collection_rate=collection_rate,
+            fastest_payment_days=fastest,
+            slowest_payment_days=slowest,
+            top_clients=top_clients,
+        )
+
+    # -----------------------------------------------------------------------
+    # Estimates / Quotes
+    # -----------------------------------------------------------------------
+
+    def create_estimate(
+        self,
+        client_identifier: str,
+        line_items: list[dict],
+        due_days: Optional[int] = 30,
+        notes: Optional[str] = None,
+        terms: Optional[str] = None,
+        currency: Optional[str] = None,
+        tax_rate: Optional[float] = None,
+        discount_amount: Optional[float] = None,
+        expiry_days: Optional[int] = 30,
+    ) -> Estimate:
+        """Create a new estimate/quote for a client.
+
+        Args:
+            client_identifier: Client ID or name.
+            line_items: List of dicts with keys: description, quantity, unit_price, tax_rate.
+            due_days: Days until due date (for the eventual invoice).
+            notes: Notes on the estimate.
+            terms: Payment terms or scope description.
+            currency: Override currency (uses client default if not specified).
+            tax_rate: Estimate-level default tax rate.
+            discount_amount: Flat discount.
+            expiry_days: Days until the quote expires (default: 30).
+
+        Returns:
+            The created Estimate.
+        """
+        client = self.get_client(client_identifier)
+        if not client:
+            raise ValueError(f"Client '{client_identifier}' not found.")
+
+        est_currency = (currency or client.currency).upper()
+        if est_currency not in CURRENCIES:
+            raise ValueError(f"Unsupported currency: {est_currency}.")
+
+        est_tax_rate = tax_rate if tax_rate is not None else 0.0
+
+        items = []
+        for item_data in line_items:
+            item_tax = item_data.get("tax_rate", None)
+            effective_tax = item_tax if item_tax is not None else est_tax_rate
+            items.append(LineItem(
+                description=item_data["description"],
+                quantity=item_data.get("quantity", 1.0),
+                unit_price=item_data["unit_price"],
+                tax_rate=effective_tax,
+            ))
+
+        estimate = Estimate(
+            client_id=client.id,
+            client_name=client.name,
+            line_items=items,
+            currency=est_currency,
+            tax_rate=est_tax_rate,
+            discount_amount=discount_amount or 0.0,
+            notes=notes,
+            terms=terms,
+        )
+        if expiry_days is not None:
+            estimate.set_expiry(expiry_days)
+
+        return self.store.save_estimate(estimate)
+
+    def get_estimate(self, estimate_id: str) -> Optional[Estimate]:
+        """Get an estimate by ID."""
+        return self.store.get_estimate(estimate_id)
+
+    def list_estimates(
+        self,
+        status: Optional[str] = None,
+        client: Optional[str] = None,
+    ) -> list[Estimate]:
+        """List estimates with optional filters."""
+        # Normalize status
+        status_enum = None
+        if status:
+            try:
+                status_enum = EstimateStatus(status.lower())
+            except ValueError:
+                raise ValueError(f"Invalid estimate status: {status}. Use: draft, sent, accepted, declined, expired, converted.")
+
+        client_id = None
+        if client:
+            c = self.get_client(client)
+            if c:
+                client_id = c.id
+
+        return self.store.list_estimates(
+            status=status_enum.value if status_enum else None,
+            client_id=client_id,
+        )
+
+    def send_estimate(self, estimate_id: str) -> Estimate:
+        """Mark an estimate as sent."""
+        est = self.store.get_estimate(estimate_id)
+        if not est:
+            raise ValueError(f"Estimate '{estimate_id}' not found.")
+        est.mark_sent()
+        return self.store.save_estimate(est)
+
+    def accept_estimate(self, estimate_id: str) -> Estimate:
+        """Mark an estimate as accepted by the client."""
+        est = self.store.get_estimate(estimate_id)
+        if not est:
+            raise ValueError(f"Estimate '{estimate_id}' not found.")
+        if est.status in (EstimateStatus.DECLINED, EstimateStatus.EXPIRED, EstimateStatus.CONVERTED):
+            raise ValueError(f"Cannot accept estimate in '{est.status.value}' status.")
+        est.mark_accepted()
+        return self.store.save_estimate(est)
+
+    def decline_estimate(self, estimate_id: str) -> Estimate:
+        """Mark an estimate as declined by the client."""
+        est = self.store.get_estimate(estimate_id)
+        if not est:
+            raise ValueError(f"Estimate '{estimate_id}' not found.")
+        if est.status == EstimateStatus.CONVERTED:
+            raise ValueError("Cannot decline an already-converted estimate.")
+        est.mark_declined()
+        return self.store.save_estimate(est)
+
+    def convert_estimate_to_invoice(
+        self,
+        estimate_id: str,
+        due_days: Optional[int] = 30,
+    ) -> tuple[Estimate, Invoice]:
+        """Convert an accepted (or sent) estimate into an invoice.
+
+        Args:
+            estimate_id: The estimate to convert.
+            due_days: Days until due date for the new invoice.
+
+        Returns:
+            Tuple of (updated estimate, new invoice).
+        """
+        est = self.store.get_estimate(estimate_id)
+        if not est:
+            raise ValueError(f"Estimate '{estimate_id}' not found.")
+        if est.status == EstimateStatus.CONVERTED:
+            raise ValueError(f"Estimate '{estimate_id}' has already been converted to invoice '{est.converted_invoice_id}'.")
+        if est.status == EstimateStatus.DECLINED:
+            raise ValueError("Cannot convert a declined estimate.")
+        if est.status == EstimateStatus.EXPIRED:
+            raise ValueError("Cannot convert an expired estimate.")
+
+        # Create the invoice from the estimate's line items
+        line_item_dicts = []
+        for item in est.line_items:
+            d = {"description": item.description, "quantity": item.quantity, "unit_price": item.unit_price}
+            if item.tax_rate > 0:
+                d["tax_rate"] = item.tax_rate
+            line_item_dicts.append(d)
+
+        invoice_id = self.store.get_next_invoice_number()
+        invoice = Invoice(
+            id=invoice_id,
+            client_id=est.client_id,
+            client_name=est.client_name,
+            line_items=[item.model_copy() for item in est.line_items],
+            status=InvoiceStatus.DRAFT,
+            currency=est.currency,
+            tax_rate=est.tax_rate,
+            discount_amount=est.discount_amount,
+            notes=est.notes,
+        )
+        if due_days is not None:
+            invoice.set_due_date(due_days)
+
+        saved_invoice = self.store.save_invoice(invoice)
+
+        # Update the estimate
+        est.status = EstimateStatus.CONVERTED
+        est.converted_invoice_id = saved_invoice.id
+        est.updated_at = datetime.now(tz=timezone.utc)
+        self.store.save_estimate(est)
+
+        return est, saved_invoice
+
+    def remove_estimate(self, estimate_id: str) -> bool:
+        """Remove an estimate. Cannot remove converted estimates."""
+        est = self.store.get_estimate(estimate_id)
+        if not est:
+            return False
+        if est.status == EstimateStatus.CONVERTED:
+            raise ValueError("Cannot remove a converted estimate.")
+        return self.store.delete_estimate(estimate_id)

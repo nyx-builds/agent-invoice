@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
+from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
@@ -24,6 +24,7 @@ class InvoiceStore:
         self.templates_dir = self.data_dir / "templates"
         self.dunning_dir = self.data_dir / "dunning"
         self.credit_notes_dir = self.data_dir / "credit_notes"
+        self.estimates_dir = self.data_dir / "estimates"
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -33,6 +34,7 @@ class InvoiceStore:
         self.templates_dir.mkdir(parents=True, exist_ok=True)
         self.dunning_dir.mkdir(parents=True, exist_ok=True)
         self.credit_notes_dir.mkdir(parents=True, exist_ok=True)
+        self.estimates_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Numbering config ---
 
@@ -280,6 +282,44 @@ class InvoiceStore:
 
     def delete_credit_note(self, credit_id: str) -> bool:
         path = self.credit_notes_dir / f"{credit_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Estimate operations ---
+
+    def save_estimate(self, estimate: Estimate) -> Estimate:
+        path = self.estimates_dir / f"{estimate.id}.json"
+        path.write_text(estimate.model_dump_json(indent=2))
+        return estimate
+
+    def get_estimate(self, estimate_id: str) -> Optional[Estimate]:
+        path = self.estimates_dir / f"{estimate_id}.json"
+        if not path.exists():
+            return None
+        est = Estimate.model_validate_json(path.read_text())
+        est.check_expired()
+        return est
+
+    def list_estimates(
+        self,
+        status: Optional[str] = None,
+        client_id: Optional[str] = None,
+    ) -> list[Estimate]:
+        estimates = []
+        for path in sorted(self.estimates_dir.glob("*.json")):
+            est = Estimate.model_validate_json(path.read_text())
+            est.check_expired()
+            if status and est.status.value != status:
+                continue
+            if client_id and est.client_id != client_id:
+                continue
+            estimates.append(est)
+        return estimates
+
+    def delete_estimate(self, estimate_id: str) -> bool:
+        path = self.estimates_dir / f"{estimate_id}.json"
         if path.exists():
             path.unlink()
             return True

@@ -588,3 +588,192 @@ class EarningsSummary(BaseModel):
     overdue_count: int = 0
     partially_paid_count: int = 0
     currency: str = "USD"
+
+
+# ---------------------------------------------------------------------------
+# A/R (Accounts Receivable) Aging
+# ---------------------------------------------------------------------------
+
+class ARAgingBucket(BaseModel):
+    """A single aging bucket (e.g. 0-30 days)."""
+
+    label: str  # e.g. "0-30", "31-60", "61-90", "90+"
+    days_low: int  # inclusive lower bound
+    days_high: Optional[int]  # inclusive upper bound, None for "90+"
+    invoice_count: int = 0
+    total_outstanding: float = 0.0
+
+
+class ClientARAging(BaseModel):
+    """A/R aging breakdown for a single client."""
+
+    client_id: str
+    client_name: Optional[str] = None
+    total_outstanding: float = 0.0
+    buckets: list[ARAgingBucket] = []
+    invoice_details: list[dict] = []  # [{id, total, amount_remaining, days_overdue, bucket}]
+
+
+class ARAgingReport(BaseModel):
+    """Full A/R aging report across all clients with outstanding balances."""
+
+    as_of_date: date
+    currency: Optional[str] = None  # None = all currencies
+    total_outstanding: float = 0.0
+    client_count: int = 0
+    bucket_totals: list[ARAgingBucket] = []
+    clients: list[ClientARAging] = []
+
+
+# ---------------------------------------------------------------------------
+# Revenue Analytics
+# ---------------------------------------------------------------------------
+
+class MonthlyRevenue(BaseModel):
+    """Revenue data for a single month."""
+
+    period: str  # "YYYY-MM"
+    invoiced: float = 0.0
+    collected: float = 0.0  # payments received that month
+    outstanding: float = 0.0  # still-unpaid invoices issued that month
+    invoice_count: int = 0
+    paid_invoice_count: int = 0
+    avg_invoice_value: float = 0.0
+
+
+class RevenueAnalytics(BaseModel):
+    """Revenue analytics over a period."""
+
+    currency: str = "USD"
+    period_start: str = ""
+    period_end: str = ""
+    months: list[MonthlyRevenue] = []
+    total_invoiced: float = 0.0
+    total_collected: float = 0.0
+    avg_days_to_pay: float = 0.0  # average days from issue to full payment
+    collection_rate: float = 0.0  # total_collected / total_invoiced
+    fastest_payment_days: Optional[int] = None
+    slowest_payment_days: Optional[int] = None
+    top_clients: list[dict] = []  # [{client_id, client_name, total_invoiced, total_paid}]
+
+
+# ---------------------------------------------------------------------------
+# Estimates / Quotes
+# ---------------------------------------------------------------------------
+
+class EstimateStatus(str, Enum):
+    """Status of an estimate/quote."""
+    DRAFT = "draft"
+    SENT = "sent"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    EXPIRED = "expired"
+    CONVERTED = "converted"  # turned into an invoice
+
+
+class Estimate(BaseModel):
+    """A quote or estimate sent to a client before work begins.
+
+    Can be converted to an invoice once accepted.
+    """
+
+    id: str = Field(default_factory=lambda: f"EST-{uuid.uuid4().hex[:6].upper()}")
+    client_id: str
+    client_name: Optional[str] = None
+    line_items: list[LineItem] = []
+    status: EstimateStatus = EstimateStatus.DRAFT
+    issue_date: date = Field(default_factory=date.today)
+    expiry_date: Optional[date] = None  # Quote validity date
+    accepted_date: Optional[date] = None
+    converted_invoice_id: Optional[str] = None  # set when converted to an invoice
+    currency: str = "USD"
+    tax_rate: float = 0.0
+    discount_amount: float = 0.0
+    notes: Optional[str] = None
+    terms: Optional[str] = None  # Payment terms or scope description
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @property
+    def subtotal(self) -> float:
+        return round(sum(item.total or 0 for item in self.line_items), 2)
+
+    @property
+    def total_tax(self) -> float:
+        return round(sum(item.tax_amount or 0 for item in self.line_items), 2)
+
+    @property
+    def total(self) -> float:
+        return round(self.subtotal + self.total_tax - self.discount_amount, 2)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expiry_date and self.status not in (EstimateStatus.ACCEPTED, EstimateStatus.CONVERTED, EstimateStatus.DECLINED):
+            return date.today() > self.expiry_date
+        return False
+
+    def set_expiry(self, days: int) -> None:
+        """Set the expiry date N days from today."""
+        self.expiry_date = date.today() + timedelta(days=days)
+
+    def mark_sent(self) -> None:
+        self.status = EstimateStatus.SENT
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def mark_accepted(self) -> None:
+        self.status = EstimateStatus.ACCEPTED
+        self.accepted_date = date.today()
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def mark_declined(self) -> None:
+        self.status = EstimateStatus.DECLINED
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def check_expired(self) -> None:
+        if self.is_expired and self.status in (EstimateStatus.DRAFT, EstimateStatus.SENT):
+            self.status = EstimateStatus.EXPIRED
+            self.updated_at = datetime.now(tz=timezone.utc)
+
+    def to_markdown(self) -> str:
+        """Export estimate as markdown."""
+        sym = get_currency_symbol(self.currency)
+        lines = [
+            f"# Estimate {self.id}",
+            "",
+            f"**Client:** {self.client_name or self.client_id}",
+            f"**Status:** {self.status.value.upper()}",
+            f"**Currency:** {self.currency}",
+            f"**Issue Date:** {self.issue_date}",
+            f"**Valid Until:** {self.expiry_date or 'N/A'}",
+            "",
+            "## Line Items",
+            "",
+            "| Description | Qty | Unit Price | Tax % | Tax | Total |",
+            "|---|---|---|---|---|---|",
+        ]
+        for item in self.line_items:
+            tax_pct = f"{item.tax_rate}%" if item.tax_rate > 0 else "—"
+            tax_amt = f"{sym}{item.tax_amount:.2f}" if item.tax_amount else "—"
+            lines.append(
+                f"| {item.description} | {item.quantity} | {sym}{item.unit_price:.2f} | {tax_pct} | {tax_amt} | {sym}{item.total:.2f} |"
+            )
+        lines.append("")
+        lines.append(f"**Subtotal: {sym}{self.subtotal:.2f}**")
+        if self.total_tax > 0:
+            lines.append(f"**Tax: {sym}{self.total_tax:.2f}**")
+        if self.discount_amount > 0:
+            lines.append(f"**Discount: -{sym}{self.discount_amount:.2f}**")
+        lines.append(f"**Total: {sym}{self.total:.2f}**")
+        if self.terms:
+            lines.append("")
+            lines.append(f"**Terms:** {self.terms}")
+        if self.notes:
+            lines.append("")
+            lines.append(f"**Notes:** {self.notes}")
+        if self.accepted_date:
+            lines.append("")
+            lines.append(f"**Accepted on:** {self.accepted_date}")
+        if self.converted_invoice_id:
+            lines.append("")
+            lines.append(f"**Converted to Invoice:** {self.converted_invoice_id}")
+        return "\n".join(lines)
