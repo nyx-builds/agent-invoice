@@ -9,6 +9,9 @@ from .models import (
     CURRENCIES,
     BUILTIN_TEMPLATES,
     Client,
+    ClientStatement,
+    CreditNote,
+    CreditNoteStatus,
     DunningAction,
     DunningConfig,
     DunningLevel,
@@ -49,6 +52,16 @@ class InvoiceService:
             raise ValueError(f"Unsupported currency: {currency}. Supported: {', '.join(sorted(CURRENCIES.keys()))}")
         client = Client(name=name, email=email, address=address, currency=currency.upper())
         return self.store.save_client(client)
+
+    def create_client(
+        self,
+        name: str,
+        email: Optional[str] = None,
+        address: Optional[str] = None,
+        currency: str = "USD",
+    ) -> Client:
+        """Alias for add_client — create and save a new client."""
+        return self.add_client(name=name, email=email, address=address, currency=currency)
 
     def get_client(self, identifier: str) -> Optional[Client]:
         """Get a client by ID or name."""
@@ -187,16 +200,56 @@ class InvoiceService:
 
     def list_invoices(
         self,
-        status: Optional[InvoiceStatus] = None,
+        status: Optional[InvoiceStatus | str] = None,
         client: Optional[str] = None,
         currency: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        min_amount: Optional[float] = None,
+        max_amount: Optional[float] = None,
+        search: Optional[str] = None,
     ) -> list[Invoice]:
+        """List invoices with optional filtering by status, client, currency, date range, amount range, and text search."""
+        # Normalize status to enum if a string was passed
+        if status is not None and isinstance(status, str):
+            try:
+                status = InvoiceStatus(status.lower())
+            except ValueError:
+                raise ValueError(f"Invalid status: {status}. Use: {', '.join(s.value for s in InvoiceStatus)}")
         client_id = None
         if client:
             c = self.get_client(client)
             if c:
                 client_id = c.id
-        return self.store.list_invoices(status=status, client_id=client_id, currency=currency)
+        invoices = self.store.list_invoices(status=status, client_id=client_id, currency=currency)
+
+        # Date range filtering
+        if date_from:
+            invoices = [inv for inv in invoices if inv.issue_date >= date_from]
+        if date_to:
+            invoices = [inv for inv in invoices if inv.issue_date <= date_to]
+
+        # Amount range filtering (on total)
+        if min_amount is not None:
+            invoices = [inv for inv in invoices if inv.total >= min_amount]
+        if max_amount is not None:
+            invoices = [inv for inv in invoices if inv.total <= max_amount]
+
+        # Text search (case-insensitive across id, client_name, notes, line item descriptions)
+        if search:
+            search_lower = search.lower()
+            matched = []
+            for inv in invoices:
+                # Check ID, client name, notes
+                haystack_parts = [inv.id.lower(), (inv.client_name or "").lower(), (inv.notes or "").lower()]
+                # Check line item descriptions
+                for item in inv.line_items:
+                    haystack_parts.append(item.description.lower())
+                if any(search_lower in part for part in haystack_parts):
+                    matched.append(inv)
+            invoices = matched
+
+        return invoices
 
     def mark_paid(self, invoice_id: str) -> Invoice:
         invoice = self.store.get_invoice(invoice_id)
@@ -323,6 +376,25 @@ class InvoiceService:
         )
         invoice.add_payment(payment)
         return self.store.save_invoice(invoice)
+
+    def add_payment(
+        self,
+        invoice_id: str,
+        amount: float,
+        method: Optional[str] = None,
+        reference: Optional[str] = None,
+        notes: Optional[str] = None,
+        payment_date: Optional[date] = None,
+    ) -> Invoice:
+        """Alias for record_payment — add a payment to an invoice."""
+        return self.record_payment(
+            invoice_id=invoice_id,
+            amount=amount,
+            method=method,
+            reference=reference,
+            notes=notes,
+            payment_date=payment_date,
+        )
 
     def list_payments(self, invoice_id: str) -> list[Payment]:
         """List all payments for an invoice."""
@@ -786,3 +858,285 @@ class InvoiceService:
     def remove_dunning_action(self, action_id: str) -> bool:
         """Remove a dunning action record."""
         return self.store.delete_dunning_action(action_id)
+
+    # --- Credit note operations ---
+
+    def create_credit_note(
+        self,
+        client_identifier: str,
+        amount: float,
+        reason: Optional[str] = None,
+        invoice_id: Optional[str] = None,
+        currency: Optional[str] = None,
+    ) -> CreditNote:
+        """Create a credit note for a client.
+
+        Args:
+            client_identifier: Client ID or name.
+            amount: Credit amount (must be positive).
+            reason: Reason for the credit (e.g. "overpayment", "refund", "billing error").
+            invoice_id: Optional original invoice this credit relates to.
+            currency: Currency override (defaults to client's currency).
+
+        Returns:
+            The created CreditNote.
+        """
+        client = self.get_client(client_identifier)
+        if not client:
+            raise ValueError(f"Client '{client_identifier}' not found.")
+
+        amount = round(amount, 2)
+        if amount <= 0:
+            raise ValueError("Credit note amount must be positive.")
+
+        inv_currency = (currency or client.currency).upper()
+        if inv_currency not in CURRENCIES:
+            raise ValueError(f"Unsupported currency: {inv_currency}.")
+
+        # If linking to an invoice, verify it exists and belongs to this client
+        if invoice_id:
+            inv = self.store.get_invoice(invoice_id)
+            if not inv:
+                raise ValueError(f"Invoice '{invoice_id}' not found.")
+            if inv.client_id != client.id:
+                raise ValueError(f"Invoice '{invoice_id}' does not belong to client '{client.name}'.")
+
+        credit = CreditNote(
+            client_id=client.id,
+            client_name=client.name,
+            amount=amount,
+            currency=inv_currency,
+            reason=reason,
+            invoice_id=invoice_id,
+        )
+        return self.store.save_credit_note(credit)
+
+    def get_credit_note(self, credit_id: str) -> Optional[CreditNote]:
+        """Get a credit note by ID."""
+        return self.store.get_credit_note(credit_id)
+
+    def list_credit_notes(
+        self,
+        client: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[CreditNote]:
+        """List credit notes, optionally filtered by client and status."""
+        client_id = None
+        if client:
+            c = self.get_client(client)
+            if c:
+                client_id = c.id
+        status_enum = None
+        if status:
+            try:
+                status_enum = CreditNoteStatus(status.lower())
+            except ValueError:
+                raise ValueError(f"Invalid credit note status: {status}. Use: open, applied, void.")
+        return self.store.list_credit_notes(client_id=client_id, status=status_enum)
+
+    def apply_credit_note(
+        self,
+        credit_id: str,
+        invoice_id: str,
+        amount: Optional[float] = None,
+    ) -> tuple[CreditNote, Invoice]:
+        """Apply a credit note to an invoice as a payment.
+
+        Args:
+            credit_id: The credit note to apply.
+            invoice_id: The invoice to apply it to.
+            amount: Amount to apply (defaults to remaining credit or remaining balance, whichever is less).
+
+        Returns:
+            Tuple of (updated credit note, updated invoice).
+        """
+        credit = self.store.get_credit_note(credit_id)
+        if not credit:
+            raise ValueError(f"Credit note '{credit_id}' not found.")
+        if credit.status == CreditNoteStatus.VOID:
+            raise ValueError(f"Credit note '{credit_id}' is voided and cannot be applied.")
+        if credit.remaining_amount <= 0:
+            raise ValueError(f"Credit note '{credit_id}' has no remaining balance.")
+
+        invoice = self.store.get_invoice(invoice_id)
+        if not invoice:
+            raise ValueError(f"Invoice '{invoice_id}' not found.")
+        if invoice.status in (InvoiceStatus.PAID, InvoiceStatus.CANCELLED):
+            raise ValueError(f"Invoice '{invoice_id}' has status {invoice.status.value} — cannot apply credit.")
+        if invoice.currency != credit.currency:
+            raise ValueError(
+                f"Currency mismatch: credit note is in {credit.currency}, invoice is in {invoice.currency}."
+            )
+
+        # Determine amount
+        if amount is None:
+            amount = min(credit.remaining_amount, invoice.amount_remaining)
+        else:
+            amount = round(amount, 2)
+
+        if amount <= 0:
+            raise ValueError("Application amount must be positive.")
+
+        # Apply credit to the credit note record
+        credit.apply(invoice_id=invoice_id, amount=amount)
+
+        # Create a payment record for the invoice
+        payment = Payment(
+            amount=amount,
+            method="credit_note",
+            reference=credit_id,
+            notes=f"Applied from credit note {credit_id}",
+        )
+        invoice.add_payment(payment)
+
+        self.store.save_credit_note(credit)
+        self.store.save_invoice(invoice)
+        return credit, invoice
+
+    def void_credit_note(self, credit_id: str) -> CreditNote:
+        """Void a credit note. Only open credit notes with no applications can be voided."""
+        credit = self.store.get_credit_note(credit_id)
+        if not credit:
+            raise ValueError(f"Credit note '{credit_id}' not found.")
+        if credit.status != CreditNoteStatus.OPEN:
+            raise ValueError(f"Cannot void credit note in '{credit.status.value}' status. Only open credit notes can be voided.")
+        if credit.applied_amount > 0:
+            raise ValueError(f"Cannot void credit note with applied amount of {credit.applied_amount}.")
+        credit.status = CreditNoteStatus.VOID
+        credit.updated_at = datetime.now(tz=timezone.utc)
+        return self.store.save_credit_note(credit)
+
+    def remove_credit_note(self, credit_id: str) -> bool:
+        """Remove a credit note. Only voided credit notes can be removed."""
+        credit = self.store.get_credit_note(credit_id)
+        if not credit:
+            return False
+        if credit.status == CreditNoteStatus.OPEN and credit.applied_amount > 0:
+            raise ValueError("Cannot remove a credit note that has been partially applied. Void it first.")
+        if credit.status == CreditNoteStatus.APPLIED:
+            raise ValueError("Cannot remove an applied credit note. Void it first.")
+        return self.store.delete_credit_note(credit_id)
+
+    # --- Client statement ---
+
+    def generate_client_statement(
+        self,
+        client_identifier: str,
+        period_start: date,
+        period_end: date,
+        currency: Optional[str] = None,
+    ) -> ClientStatement:
+        """Generate a financial statement for a client over a period.
+
+        Includes all invoices, payments, and credit notes within the date range,
+        with opening and closing balances.
+
+        Args:
+            client_identifier: Client ID or name.
+            period_start: Start of the statement period.
+            period_end: End of the statement period.
+            currency: Filter by currency (defaults to client's currency).
+
+        Returns:
+            A ClientStatement with all activity and balances.
+        """
+        if period_start > period_end:
+            raise ValueError("period_start must be before or equal to period_end.")
+
+        client = self.get_client(client_identifier)
+        if not client:
+            raise ValueError(f"Client '{client_identifier}' not found.")
+
+        stmt_currency = (currency or client.currency).upper()
+
+        # Get all invoices for this client in this currency
+        all_invoices = self.store.list_invoices(client_id=client.id, currency=stmt_currency)
+        # Get all credit notes for this client in this currency
+        all_credits = self.store.list_credit_notes(client_id=client.id)
+
+        # --- Calculate opening balance ---
+        # Opening balance = all invoiced before period_start - all payments before period_start - all credits before period_start
+        opening_invoiced = 0.0
+        opening_paid = 0.0
+        opening_credits = 0.0
+
+        for inv in all_invoices:
+            if inv.issue_date < period_start:
+                opening_invoiced += inv.total
+                for p in inv.payments:
+                    if p.payment_date < period_start:
+                        opening_paid += p.amount
+
+        for credit in all_credits:
+            if credit.currency != stmt_currency:
+                continue
+            if credit.issue_date < period_start:
+                opening_credits += credit.applied_amount
+
+        opening_balance = round(opening_invoiced - opening_paid - opening_credits, 2)
+
+        # --- Collect period activity ---
+        period_invoices = []
+        period_payments = []
+        period_credits = []
+        total_invoiced = 0.0
+        total_paid = 0.0
+        total_credits = 0.0
+
+        for inv in all_invoices:
+            if period_start <= inv.issue_date <= period_end:
+                period_invoices.append({
+                    "id": inv.id,
+                    "issue_date": str(inv.issue_date),
+                    "total": inv.total,
+                    "status": inv.status.value,
+                    "due_date": str(inv.due_date) if inv.due_date else None,
+                })
+                total_invoiced += inv.total
+            # Collect payments within the period (may be on invoices from any date)
+            for p in inv.payments:
+                if period_start <= p.payment_date <= period_end:
+                    period_payments.append({
+                        "id": p.id,
+                        "invoice_id": inv.id,
+                        "amount": p.amount,
+                        "date": str(p.payment_date),
+                        "method": p.method,
+                    })
+                    total_paid += p.amount
+
+        for credit in all_credits:
+            if credit.currency != stmt_currency:
+                continue
+            if period_start <= credit.issue_date <= period_end:
+                period_credits.append({
+                    "id": credit.id,
+                    "amount": credit.amount,
+                    "reason": credit.reason,
+                    "status": credit.status.value,
+                    "date": str(credit.issue_date),
+                    "applied_amount": credit.applied_amount,
+                })
+                total_credits += credit.amount
+
+        # --- Calculate closing balance ---
+        closing_balance = round(
+            opening_balance + total_invoiced - total_paid - total_credits, 2
+        )
+
+        statement = ClientStatement(
+            client_id=client.id,
+            client_name=client.name,
+            currency=stmt_currency,
+            period_start=period_start,
+            period_end=period_end,
+            opening_balance=opening_balance,
+            invoices=period_invoices,
+            payments=period_payments,
+            credit_notes=period_credits,
+            total_invoiced=round(total_invoiced, 2),
+            total_paid=round(total_paid, 2),
+            total_credits=round(total_credits, 2),
+            closing_balance=closing_balance,
+        )
+        return statement

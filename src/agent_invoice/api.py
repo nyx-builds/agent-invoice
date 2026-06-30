@@ -18,6 +18,17 @@ def _get_service() -> InvoiceService:
     return InvoiceService(InvoiceStore())
 
 
+def _invoice_to_dict(inv) -> dict:
+    """Serialize an Invoice to a summary dict."""
+    return {
+        "id": inv.id, "client": inv.client_name, "currency": inv.currency,
+        "status": inv.status.value, "subtotal": inv.subtotal, "tax": inv.total_tax,
+        "total": inv.total, "amount_paid": inv.amount_paid,
+        "amount_remaining": inv.amount_remaining,
+        "due_date": str(inv.due_date) if inv.due_date else None,
+    }
+
+
 # --- Request schemas ---
 
 
@@ -121,6 +132,19 @@ class NumberingUpdateRequest(APIBaseModel):
     next_number: Optional[int] = None
 
 
+class CreditNoteCreateRequest(APIBaseModel):
+    client: str
+    amount: float
+    reason: Optional[str] = None
+    invoice_id: Optional[str] = None
+    currency: Optional[str] = None
+
+
+class CreditNoteApplyRequest(APIBaseModel):
+    invoice_id: str
+    amount: Optional[float] = None
+
+
 # --- App factory ---
 
 
@@ -128,7 +152,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Agent Invoice API",
         description="REST API for autonomous agent billing — create invoices, manage clients, track payments, dunning, templates",
-        version="0.4.0",
+        version="0.5.0",
     )
 
     # --- Clients ---
@@ -202,19 +226,34 @@ def create_app() -> FastAPI:
         status: Optional[str] = Query(None),
         client: Optional[str] = Query(None),
         currency: Optional[str] = Query(None),
+        date_from: Optional[str] = Query(None),
+        date_to: Optional[str] = Query(None),
+        min_amount: Optional[float] = Query(None),
+        max_amount: Optional[float] = Query(None),
+        search: Optional[str] = Query(None),
     ):
         svc = _get_service()
+        from datetime import date as date_type
+        parsed_from = None
+        parsed_to = None
+        if date_from:
+            try:
+                parsed_from = date_type.fromisoformat(date_from)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid date_from format: {date_from}")
+        if date_to:
+            try:
+                parsed_to = date_type.fromisoformat(date_to)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid date_to format: {date_to}")
         status_enum = InvoiceStatus(status) if status else None
-        invoices = svc.list_invoices(status=status_enum, client=client, currency=currency)
-        result = []
-        for inv in invoices:
-            result.append({
-                "id": inv.id, "client": inv.client_name, "currency": inv.currency,
-                "status": inv.status.value, "subtotal": inv.subtotal, "tax": inv.total_tax,
-                "total": inv.total, "amount_paid": inv.amount_paid, "amount_remaining": inv.amount_remaining,
-                "due_date": str(inv.due_date) if inv.due_date else None,
-            })
-        return result
+        invoices = svc.list_invoices(
+            status=status_enum, client=client, currency=currency,
+            date_from=parsed_from, date_to=parsed_to,
+            min_amount=min_amount, max_amount=max_amount,
+            search=search,
+        )
+        return [_invoice_to_dict(inv) for inv in invoices]
 
     @app.get("/invoices/{invoice_id}")
     def get_invoice(invoice_id: str):
@@ -609,5 +648,128 @@ def create_app() -> FastAPI:
         for code, info in sorted(CURRENCIES.items()):
             result.append({"code": code, "symbol": info["symbol"], "name": info["name"], "decimals": info["decimals"]})
         return result
+
+    # --- Credit notes ---
+
+    @app.post("/credit-notes", status_code=201)
+    def create_credit_note(req: CreditNoteCreateRequest):
+        svc = _get_service()
+        try:
+            credit = svc.create_credit_note(
+                client_identifier=req.client,
+                amount=req.amount,
+                reason=req.reason,
+                invoice_id=req.invoice_id,
+                currency=req.currency,
+            )
+            return {
+                "id": credit.id, "client": credit.client_name,
+                "amount": credit.amount, "currency": credit.currency,
+                "reason": credit.reason, "status": credit.status.value,
+                "remaining": credit.remaining_amount,
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/credit-notes")
+    def list_credit_notes(
+        client: Optional[str] = Query(None),
+        status: Optional[str] = Query(None),
+    ):
+        svc = _get_service()
+        try:
+            credits = svc.list_credit_notes(client=client, status=status)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        result = []
+        for credit in credits:
+            result.append({
+                "id": credit.id, "client": credit.client_name,
+                "amount": credit.amount, "currency": credit.currency,
+                "applied_amount": credit.applied_amount,
+                "remaining_amount": credit.remaining_amount,
+                "status": credit.status.value, "reason": credit.reason,
+                "issue_date": str(credit.issue_date),
+            })
+        return result
+
+    @app.get("/credit-notes/{credit_id}")
+    def get_credit_note(credit_id: str):
+        svc = _get_service()
+        credit = svc.get_credit_note(credit_id)
+        if not credit:
+            raise HTTPException(status_code=404, detail=f"Credit note '{credit_id}' not found")
+        data = credit.model_dump(mode="json")
+        data["applied_amount"] = credit.applied_amount
+        data["remaining_amount"] = credit.remaining_amount
+        return data
+
+    @app.post("/credit-notes/{credit_id}/apply")
+    def apply_credit_note(credit_id: str, req: CreditNoteApplyRequest):
+        svc = _get_service()
+        try:
+            credit, invoice = svc.apply_credit_note(
+                credit_id=credit_id,
+                invoice_id=req.invoice_id,
+                amount=req.amount,
+            )
+            return {
+                "credit_note": {
+                    "id": credit.id, "applied_amount": credit.applied_amount,
+                    "remaining_amount": credit.remaining_amount, "status": credit.status.value,
+                },
+                "invoice": {
+                    "id": invoice.id, "status": invoice.status.value,
+                    "amount_paid": invoice.amount_paid, "amount_remaining": invoice.amount_remaining,
+                },
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/credit-notes/{credit_id}/void")
+    def void_credit_note(credit_id: str):
+        svc = _get_service()
+        try:
+            credit = svc.void_credit_note(credit_id)
+            return {"id": credit.id, "status": credit.status.value}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.delete("/credit-notes/{credit_id}")
+    def delete_credit_note(credit_id: str):
+        svc = _get_service()
+        try:
+            if svc.remove_credit_note(credit_id):
+                return {"deleted": True}
+            raise HTTPException(status_code=404, detail=f"Credit note '{credit_id}' not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # --- Client statements ---
+
+    @app.get("/clients/{client}/statement")
+    def client_statement(
+        client: str,
+        period_start: str = Query(..., description="YYYY-MM-DD"),
+        period_end: str = Query(..., description="YYYY-MM-DD"),
+        currency: Optional[str] = Query(None),
+    ):
+        from datetime import date as date_type
+        svc = _get_service()
+        try:
+            start = date_type.fromisoformat(period_start)
+            end = date_type.fromisoformat(period_end)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        try:
+            stmt = svc.generate_client_statement(
+                client_identifier=client,
+                period_start=start,
+                period_end=end,
+                currency=currency,
+            )
+            return stmt.model_dump(mode="json")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     return app

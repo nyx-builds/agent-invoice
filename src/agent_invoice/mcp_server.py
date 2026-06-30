@@ -764,6 +764,186 @@ async def list_tools() -> list[Tool]:
                 "required": ["action_id"],
             },
         ),
+        Tool(
+            name="search_invoices",
+            description="Search invoices by text, date range, or amount range. Text search covers invoice ID, client name, notes, and line item descriptions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": "Text to search for (case-insensitive, matches invoice ID, client name, notes, line item descriptions)",
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "Filter invoices issued on or after this date (YYYY-MM-DD)",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "Filter invoices issued on or before this date (YYYY-MM-DD)",
+                    },
+                    "min_amount": {
+                        "type": "number",
+                        "description": "Filter invoices with total >= this amount",
+                    },
+                    "max_amount": {
+                        "type": "number",
+                        "description": "Filter invoices with total <= this amount",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["draft", "sent", "paid", "overdue", "cancelled", "partially_paid"],
+                        "description": "Filter by status",
+                    },
+                    "client": {
+                        "type": "string",
+                        "description": "Filter by client ID or name",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Filter by currency code",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="create_credit_note",
+            description="Create a credit note for a client. Credit notes represent refunds, overpayments, or billing corrections that can be applied to invoices.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {
+                        "type": "string",
+                        "description": "Client ID or name",
+                    },
+                    "amount": {
+                        "type": "number",
+                        "description": "Credit amount (must be positive)",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Reason for the credit (e.g. refund, overpayment, billing error)",
+                    },
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "Original invoice this credit relates to (optional)",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Currency code (defaults to client's currency)",
+                    },
+                },
+                "required": ["client", "amount"],
+            },
+        ),
+        Tool(
+            name="list_credit_notes",
+            description="List credit notes, optionally filtered by client and status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {
+                        "type": "string",
+                        "description": "Filter by client ID or name",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "applied", "void"],
+                        "description": "Filter by credit note status",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_credit_note",
+            description="Get full details of a credit note by ID, including applications.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "credit_id": {
+                        "type": "string",
+                        "description": "The credit note ID",
+                    },
+                },
+                "required": ["credit_id"],
+            },
+        ),
+        Tool(
+            name="apply_credit_note",
+            description="Apply a credit note to an invoice. This creates a payment record on the invoice and reduces the credit note's remaining balance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "credit_id": {
+                        "type": "string",
+                        "description": "The credit note ID to apply",
+                    },
+                    "invoice_id": {
+                        "type": "string",
+                        "description": "The invoice ID to apply the credit to",
+                    },
+                    "amount": {
+                        "type": "number",
+                        "description": "Amount to apply (defaults to remaining credit or remaining balance, whichever is less)",
+                    },
+                },
+                "required": ["credit_id", "invoice_id"],
+            },
+        ),
+        Tool(
+            name="void_credit_note",
+            description="Void a credit note. Only open credit notes with no applications can be voided.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "credit_id": {
+                        "type": "string",
+                        "description": "The credit note ID to void",
+                    },
+                },
+                "required": ["credit_id"],
+            },
+        ),
+        Tool(
+            name="client_statement",
+            description="Generate a financial statement for a client over a period. Shows all invoices, payments, credit notes, and opening/closing balances.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {
+                        "type": "string",
+                        "description": "Client ID or name",
+                    },
+                    "period_start": {
+                        "type": "string",
+                        "description": "Start of the statement period (YYYY-MM-DD)",
+                    },
+                    "period_end": {
+                        "type": "string",
+                        "description": "End of the statement period (YYYY-MM-DD)",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Filter by currency code (defaults to client's currency)",
+                    },
+                },
+                "required": ["client", "period_start", "period_end"],
+            },
+        ),
+        Tool(
+            name="remove_credit_note",
+            description="Remove a credit note. Only voided credit notes (or open ones with no applications) can be removed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "credit_id": {
+                        "type": "string",
+                        "description": "The credit note ID to remove",
+                    },
+                },
+                "required": ["credit_id"],
+            },
+        ),
     ]
 
 
@@ -1271,6 +1451,156 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if svc.remove_dunning_action(arguments["action_id"]):
             return _json_result({"removed": True, "action_id": arguments["action_id"]})
         return _text_result(f"Dunning action not found: {arguments['action_id']}")
+
+    elif name == "search_invoices":
+        from datetime import date as date_type
+        date_from = None
+        date_to = None
+        if "date_from" in arguments:
+            try:
+                date_from = date_type.fromisoformat(arguments["date_from"])
+            except ValueError:
+                return _text_result(f"Error: Invalid date_from format. Use YYYY-MM-DD.")
+        if "date_to" in arguments:
+            try:
+                date_to = date_type.fromisoformat(arguments["date_to"])
+            except ValueError:
+                return _text_result(f"Error: Invalid date_to format. Use YYYY-MM-DD.")
+        status = InvoiceStatus(arguments["status"]) if "status" in arguments else None
+        invoices = svc.list_invoices(
+            status=status,
+            client=arguments.get("client"),
+            currency=arguments.get("currency"),
+            date_from=date_from,
+            date_to=date_to,
+            min_amount=arguments.get("min_amount"),
+            max_amount=arguments.get("max_amount"),
+            search=arguments.get("search"),
+        )
+        result = []
+        for inv in invoices:
+            result.append({
+                "id": inv.id,
+                "client": inv.client_name,
+                "currency": inv.currency,
+                "status": inv.status.value,
+                "total": inv.total,
+                "amount_paid": inv.amount_paid,
+                "amount_remaining": inv.amount_remaining,
+                "issue_date": str(inv.issue_date),
+                "due_date": str(inv.due_date) if inv.due_date else None,
+            })
+        return _json_result({"count": len(result), "invoices": result})
+
+    elif name == "create_credit_note":
+        try:
+            credit = svc.create_credit_note(
+                client_identifier=arguments["client"],
+                amount=arguments["amount"],
+                reason=arguments.get("reason"),
+                invoice_id=arguments.get("invoice_id"),
+                currency=arguments.get("currency"),
+            )
+            return _json_result({
+                "id": credit.id,
+                "client": credit.client_name,
+                "amount": credit.amount,
+                "currency": credit.currency,
+                "reason": credit.reason,
+                "status": credit.status.value,
+                "remaining": credit.remaining_amount,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_credit_notes":
+        try:
+            credits = svc.list_credit_notes(
+                client=arguments.get("client"),
+                status=arguments.get("status"),
+            )
+            result = []
+            for credit in credits:
+                result.append({
+                    "id": credit.id,
+                    "client": credit.client_name,
+                    "amount": credit.amount,
+                    "currency": credit.currency,
+                    "applied_amount": credit.applied_amount,
+                    "remaining_amount": credit.remaining_amount,
+                    "status": credit.status.value,
+                    "reason": credit.reason,
+                    "issue_date": str(credit.issue_date),
+                })
+            return _json_result(result)
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "get_credit_note":
+        credit = svc.get_credit_note(arguments["credit_id"])
+        if not credit:
+            return _text_result(f"Credit note not found: {arguments['credit_id']}")
+        data = credit.model_dump(mode="json")
+        data["applied_amount"] = credit.applied_amount
+        data["remaining_amount"] = credit.remaining_amount
+        return _json_result(data)
+
+    elif name == "apply_credit_note":
+        try:
+            credit, invoice = svc.apply_credit_note(
+                credit_id=arguments["credit_id"],
+                invoice_id=arguments["invoice_id"],
+                amount=arguments.get("amount"),
+            )
+            return _json_result({
+                "credit_note": {
+                    "id": credit.id,
+                    "applied_amount": credit.applied_amount,
+                    "remaining_amount": credit.remaining_amount,
+                    "status": credit.status.value,
+                },
+                "invoice": {
+                    "id": invoice.id,
+                    "status": invoice.status.value,
+                    "amount_paid": invoice.amount_paid,
+                    "amount_remaining": invoice.amount_remaining,
+                },
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "void_credit_note":
+        try:
+            credit = svc.void_credit_note(arguments["credit_id"])
+            return _json_result({"id": credit.id, "status": credit.status.value})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_credit_note":
+        try:
+            if svc.remove_credit_note(arguments["credit_id"]):
+                return _json_result({"removed": True, "credit_id": arguments["credit_id"]})
+            return _text_result(f"Credit note not found: {arguments['credit_id']}")
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "client_statement":
+        from datetime import date as date_type
+        try:
+            period_start = date_type.fromisoformat(arguments["period_start"])
+            period_end = date_type.fromisoformat(arguments["period_end"])
+        except ValueError:
+            return _text_result("Error: Invalid date format. Use YYYY-MM-DD.")
+        try:
+            statement = svc.generate_client_statement(
+                client_identifier=arguments["client"],
+                period_start=period_start,
+                period_end=period_end,
+                currency=arguments.get("currency"),
+            )
+            return _json_result(statement.model_dump(mode="json"))
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
 
     return _text_result(f"Unknown tool: {name}")
 

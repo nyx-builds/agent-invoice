@@ -489,6 +489,89 @@ class DunningConfig(BaseModel):
         return messages.get(level, "")
 
 
+class CreditNoteStatus(str, Enum):
+    """Status for a credit note."""
+    OPEN = "open"       # Available to apply
+    APPLIED = "applied" # Fully applied to invoices
+    VOID = "void"       # Cancelled
+
+
+class CreditNote(BaseModel):
+    """A credit note that can be applied to invoices or issued standalone (refunds/credits)."""
+    id: str = Field(default_factory=lambda: f"CN-{uuid.uuid4().hex[:6].upper()}")
+    client_id: str
+    client_name: Optional[str] = None
+    invoice_id: Optional[str] = None  # Original invoice this credit relates to (if any)
+    amount: float
+    currency: str = "USD"
+    status: CreditNoteStatus = CreditNoteStatus.OPEN
+    reason: Optional[str] = None  # e.g. "overpayment", "refund", "billing error"
+    issue_date: date = Field(default_factory=date.today)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    # Applications: list of (invoice_id, amount) where this credit was applied
+    applications: list[dict] = []  # [{"invoice_id": "...", "amount": 100.00, "applied_at": "2026-..."}]
+
+    @property
+    def applied_amount(self) -> float:
+        """Total amount already applied to invoices."""
+        return round(sum(a["amount"] for a in self.applications), 2)
+
+    @property
+    def remaining_amount(self) -> float:
+        """Credit amount still available to apply."""
+        return round(self.amount - self.applied_amount, 2)
+
+    def apply(self, invoice_id: str, amount: float) -> None:
+        """Apply a portion of this credit to an invoice."""
+        amount = round(amount, 2)
+        if amount <= 0:
+            raise ValueError("Application amount must be positive.")
+        if amount > self.remaining_amount + 0.01:
+            raise ValueError(
+                f"Application amount ({amount}) exceeds remaining credit ({self.remaining_amount})."
+            )
+        self.applications.append({
+            "invoice_id": invoice_id,
+            "amount": amount,
+            "applied_at": datetime.now(tz=timezone.utc).isoformat(),
+        })
+        self.updated_at = datetime.now(tz=timezone.utc)
+        if self.remaining_amount <= 0.01:
+            self.status = CreditNoteStatus.APPLIED
+
+
+class ClientStatement(BaseModel):
+    """A financial statement for a client over a period — invoices, payments, credits, and balances."""
+    client_id: str
+    client_name: Optional[str] = None
+    currency: str = "USD"
+    period_start: date
+    period_end: date
+
+    # Opening balance (carried forward debt/credit before period start)
+    opening_balance: float = 0.0  # Positive = client owes you; negative = credit in their favor
+
+    # Activity during the period
+    invoices: list[dict] = []  # [{"id": "...", "issue_date": "...", "total": 100.00, "status": "paid"}]
+    payments: list[dict] = []  # [{"id": "...", "invoice_id": "...", "amount": 100.00, "date": "..."}]
+    credit_notes: list[dict] = []  # [{"id": "...", "amount": 50.00, "reason": "refund", "date": "..."}]
+
+    # Totals during the period
+    total_invoiced: float = 0.0
+    total_paid: float = 0.0
+    total_credits: float = 0.0
+
+    # Closing balance
+    closing_balance: float = 0.0  # Positive = client owes; negative = credit in their favor
+
+    @property
+    def balance_due(self) -> float:
+        """Amount the client currently owes (positive) or credit available (negative)."""
+        return self.closing_balance
+
+
 class EarningsSummary(BaseModel):
     """Summary of earnings across all invoices."""
 

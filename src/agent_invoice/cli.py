@@ -171,11 +171,36 @@ def invoice_create(client: str, item: tuple, due: int, notes: Optional[str], cur
 @click.option("--status", "-s", type=click.Choice(["draft", "sent", "paid", "overdue", "cancelled", "partially_paid"]), help="Filter by status")
 @click.option("--client", "-c", help="Filter by client ID or name")
 @click.option("--currency", help="Filter by currency code")
-def invoice_list(status: Optional[str], client: Optional[str], currency: Optional[str]):
-    """List all invoices."""
+@click.option("--date-from", help="Invoices issued on or after this date (YYYY-MM-DD)")
+@click.option("--date-to", help="Invoices issued on or before this date (YYYY-MM-DD)")
+@click.option("--min-amount", type=float, help="Minimum total amount")
+@click.option("--max-amount", type=float, help="Maximum total amount")
+@click.option("--search", help="Text search (matches ID, client, notes, items)")
+def invoice_list(status: Optional[str], client: Optional[str], currency: Optional[str], date_from: Optional[str], date_to: Optional[str], min_amount: Optional[float], max_amount: Optional[float], search: Optional[str]):
+    """List all invoices with optional filters."""
     svc = get_service()
     status_enum = InvoiceStatus(status) if status else None
-    invoices = svc.list_invoices(status=status_enum, client=client, currency=currency)
+    from datetime import date as date_type
+    parsed_from = None
+    parsed_to = None
+    if date_from:
+        try:
+            parsed_from = date_type.fromisoformat(date_from)
+        except ValueError:
+            console.print(f"[red]✗[/red] Invalid date_from format: {date_from}. Use YYYY-MM-DD.")
+            sys.exit(1)
+    if date_to:
+        try:
+            parsed_to = date_type.fromisoformat(date_to)
+        except ValueError:
+            console.print(f"[red]✗[/red] Invalid date_to format: {date_to}. Use YYYY-MM-DD.")
+            sys.exit(1)
+    invoices = svc.list_invoices(
+        status=status_enum, client=client, currency=currency,
+        date_from=parsed_from, date_to=parsed_to,
+        min_amount=min_amount, max_amount=max_amount,
+        search=search,
+    )
     if not invoices:
         console.print("[dim]No invoices found.[/dim]")
         return
@@ -1033,6 +1058,217 @@ def dunning_remove(action_id: str):
     else:
         console.print(f"[red]✗[/red] Dunning action not found: {action_id}")
         sys.exit(1)
+
+
+# --- Credit note commands ---
+
+@main.group("credit")
+def credit():
+    """Manage credit notes."""
+    pass
+
+
+@credit.command("create")
+@click.option("--client", "-c", required=True, help="Client ID or name")
+@click.option("--amount", "-a", type=float, required=True, help="Credit amount")
+@click.option("--reason", "-r", help="Reason for the credit (e.g. refund, overpayment)")
+@click.option("--invoice", help="Original invoice this credit relates to")
+@click.option("--currency", help="Currency code (defaults to client's)")
+def credit_create(client: str, amount: float, reason: Optional[str], invoice: Optional[str], currency: Optional[str]):
+    """Create a credit note for a client."""
+    svc = get_service()
+    try:
+        credit_note = svc.create_credit_note(
+            client_identifier=client,
+            amount=amount,
+            reason=reason,
+            invoice_id=invoice,
+            currency=currency,
+        )
+        sym = get_currency_symbol(credit_note.currency)
+        console.print(f"[green]✓[/green] Credit note created: {credit_note.id}")
+        console.print(f"  Client:   {credit_note.client_name}")
+        console.print(f"  Amount:   {sym}{credit_note.amount:.2f}")
+        if credit_note.reason:
+            console.print(f"  Reason:   {credit_note.reason}")
+        if credit_note.invoice_id:
+            console.print(f"  Invoice:  {credit_note.invoice_id}")
+        console.print(f"  Status:   {credit_note.status.value}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@credit.command("list")
+@click.option("--client", "-c", help="Filter by client ID or name")
+@click.option("--status", "-s", type=click.Choice(["open", "applied", "void"]), help="Filter by status")
+def credit_list(client: Optional[str], status: Optional[str]):
+    """List credit notes."""
+    svc = get_service()
+    try:
+        credits = svc.list_credit_notes(client=client, status=status)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+    if not credits:
+        console.print("[dim]No credit notes found.[/dim]")
+        return
+    table = Table(title="Credit Notes")
+    table.add_column("ID", style="cyan")
+    table.add_column("Client", style="bold")
+    table.add_column("Amount", justify="right")
+    table.add_column("Applied", justify="right")
+    table.add_column("Remaining", justify="right")
+    table.add_column("Status")
+    table.add_column("Reason")
+    table.add_column("Date")
+    for credit_note in credits:
+        sym = get_currency_symbol(credit_note.currency)
+        status_style = {
+            "open": "[green]OPEN[/green]",
+            "applied": "[blue]APPLIED[/blue]",
+            "void": "[dim]VOID[/dim]",
+        }.get(credit_note.status.value, credit_note.status.value)
+        table.add_row(
+            credit_note.id,
+            credit_note.client_name or credit_note.client_id,
+            f"{sym}{credit_note.amount:.2f}",
+            f"{sym}{credit_note.applied_amount:.2f}",
+            f"{sym}{credit_note.remaining_amount:.2f}",
+            status_style,
+            credit_note.reason or "—",
+            str(credit_note.issue_date),
+        )
+    console.print(table)
+
+
+@credit.command("show")
+@click.argument("credit_id")
+def credit_show(credit_id: str):
+    """Show credit note details."""
+    svc = get_service()
+    credit_note = svc.get_credit_note(credit_id)
+    if not credit_note:
+        console.print(f"[red]✗[/red] Credit note not found: {credit_id}")
+        sys.exit(1)
+    sym = get_currency_symbol(credit_note.currency)
+    console.print(f"\n[bold]Credit Note: {credit_note.id}[/bold]")
+    console.print(f"  Client:    {credit_note.client_name} ({credit_note.client_id})")
+    console.print(f"  Amount:    {sym}{credit_note.amount:.2f} {credit_note.currency}")
+    console.print(f"  Applied:   {sym}{credit_note.applied_amount:.2f}")
+    console.print(f"  Remaining: {sym}{credit_note.remaining_amount:.2f}")
+    console.print(f"  Status:    {credit_note.status.value}")
+    if credit_note.reason:
+        console.print(f"  Reason:    {credit_note.reason}")
+    if credit_note.invoice_id:
+        console.print(f"  Invoice:   {credit_note.invoice_id}")
+    if credit_note.applications:
+        console.print(f"\n  [bold]Applications:[/bold]")
+        for app in credit_note.applications:
+            console.print(f"    {app['invoice_id']}: {sym}{app['amount']:.2f}")
+
+
+@credit.command("apply")
+@click.argument("credit_id")
+@click.argument("invoice_id")
+@click.option("--amount", "-a", type=float, default=None, help="Amount to apply (defaults to remaining credit or balance)")
+def credit_apply(credit_id: str, invoice_id: str, amount: Optional[float]):
+    """Apply a credit note to an invoice."""
+    svc = get_service()
+    try:
+        credit_note, invoice = svc.apply_credit_note(credit_id, invoice_id, amount=amount)
+        sym = get_currency_symbol(invoice.currency)
+        console.print(f"[green]✓[/green] Applied credit note {credit_note.id} to invoice {invoice.id}")
+        console.print(f"  Credit remaining: {sym}{credit_note.remaining_amount:.2f}")
+        console.print(f"  Invoice status:   {invoice.status.value}")
+        console.print(f"  Invoice paid:     {sym}{invoice.amount_paid:.2f}")
+        console.print(f"  Invoice remaining:{sym}{invoice.amount_remaining:.2f}")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@credit.command("void")
+@click.argument("credit_id")
+def credit_void(credit_id: str):
+    """Void a credit note."""
+    svc = get_service()
+    try:
+        credit_note = svc.void_credit_note(credit_id)
+        console.print(f"[yellow]✓[/yellow] Credit note {credit_note.id} voided")
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+@credit.command("remove")
+@click.argument("credit_id")
+def credit_remove(credit_id: str):
+    """Remove a credit note (must be voided first)."""
+    svc = get_service()
+    try:
+        if svc.remove_credit_note(credit_id):
+            console.print(f"[green]✓[/green] Credit note removed: {credit_id}")
+        else:
+            console.print(f"[red]✗[/red] Credit note not found: {credit_id}")
+            sys.exit(1)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+
+# --- Statement command ---
+
+@main.command("statement")
+@click.argument("client")
+@click.option("--from", "date_from_str", required=True, help="Period start date (YYYY-MM-DD)")
+@click.option("--to", "date_to_str", required=True, help="Period end date (YYYY-MM-DD)")
+@click.option("--currency", help="Filter by currency")
+def client_statement(client: str, date_from_str: str, date_to_str: str, currency: Optional[str]):
+    """Generate a financial statement for a client."""
+    from datetime import date as date_type
+    try:
+        period_start = date_type.fromisoformat(date_from_str)
+        period_end = date_type.fromisoformat(date_to_str)
+    except ValueError:
+        console.print(f"[red]✗[/red] Invalid date format. Use YYYY-MM-DD.")
+        sys.exit(1)
+    svc = get_service()
+    try:
+        stmt = svc.generate_client_statement(
+            client_identifier=client,
+            period_start=period_start,
+            period_end=period_end,
+            currency=currency,
+        )
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        sys.exit(1)
+
+    sym = get_currency_symbol(stmt.currency)
+    console.print(f"\n[bold]Statement: {stmt.client_name}[/bold]")
+    console.print(f"  Period:   {stmt.period_start} to {stmt.period_end}")
+    console.print(f"  Currency: {stmt.currency}")
+    console.print(f"\n  Opening Balance: {sym}{stmt.opening_balance:.2f}")
+    console.print(f"  Invoiced:        {sym}{stmt.total_invoiced:.2f}")
+    console.print(f"  Paid:           -{sym}{stmt.total_paid:.2f}")
+    console.print(f"  Credits:        -{sym}{stmt.total_credits:.2f}")
+    console.print(f"  [bold]Closing Balance:  {sym}{stmt.closing_balance:.2f}[/bold]")
+
+    if stmt.invoices:
+        console.print(f"\n  [bold]Invoices ({len(stmt.invoices)}):[/bold]")
+        for inv in stmt.invoices:
+            console.print(f"    {inv['id']} — {inv['issue_date']} — {sym}{inv['total']:.2f} — {inv['status']}")
+
+    if stmt.payments:
+        console.print(f"\n  [bold]Payments ({len(stmt.payments)}):[/bold]")
+        for p in stmt.payments:
+            console.print(f"    {p['date']} — {p['invoice_id']} — {sym}{p['amount']:.2f} — {p.get('method', '—')}")
+
+    if stmt.credit_notes:
+        console.print(f"\n  [bold]Credit Notes ({len(stmt.credit_notes)}):[/bold]")
+        for cn in stmt.credit_notes:
+            console.print(f"    {cn['id']} — {cn['date']} — {sym}{cn['amount']:.2f} — {cn.get('reason', '—')}")
 
 
 # --- REST API serve ---

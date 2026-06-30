@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, DunningAction, DunningConfig, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
+from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
@@ -23,6 +23,7 @@ class InvoiceStore:
         self.recurring_dir = self.data_dir / "recurring"
         self.templates_dir = self.data_dir / "templates"
         self.dunning_dir = self.data_dir / "dunning"
+        self.credit_notes_dir = self.data_dir / "credit_notes"
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -31,6 +32,7 @@ class InvoiceStore:
         self.recurring_dir.mkdir(parents=True, exist_ok=True)
         self.templates_dir.mkdir(parents=True, exist_ok=True)
         self.dunning_dir.mkdir(parents=True, exist_ok=True)
+        self.credit_notes_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Numbering config ---
 
@@ -243,6 +245,41 @@ class InvoiceStore:
 
     def delete_dunning_action(self, action_id: str) -> bool:
         path = self.dunning_dir / f"{action_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Credit note operations ---
+
+    def save_credit_note(self, credit: CreditNote) -> CreditNote:
+        path = self.credit_notes_dir / f"{credit.id}.json"
+        path.write_text(credit.model_dump_json(indent=2))
+        return credit
+
+    def get_credit_note(self, credit_id: str) -> Optional[CreditNote]:
+        path = self.credit_notes_dir / f"{credit_id}.json"
+        if not path.exists():
+            return None
+        return CreditNote.model_validate_json(path.read_text())
+
+    def list_credit_notes(
+        self,
+        client_id: Optional[str] = None,
+        status: Optional[CreditNoteStatus] = None,
+    ) -> list[CreditNote]:
+        credits = []
+        for path in sorted(self.credit_notes_dir.glob("*.json")):
+            credit = CreditNote.model_validate_json(path.read_text())
+            if client_id and credit.client_id != client_id:
+                continue
+            if status and credit.status != status:
+                continue
+            credits.append(credit)
+        return credits
+
+    def delete_credit_note(self, credit_id: str) -> bool:
+        path = self.credit_notes_dir / f"{credit_id}.json"
         if path.exists():
             path.unlink()
             return True
