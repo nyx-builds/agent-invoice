@@ -152,7 +152,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Agent Invoice API",
         description="REST API for autonomous agent billing — create invoices, manage clients, track payments, dunning, templates",
-        version="0.6.0",
+        version="0.7.0",
     )
 
     # --- Clients ---
@@ -197,6 +197,34 @@ def create_app() -> FastAPI:
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
 
     # --- Invoices ---
+
+    # NOTE: Bulk operation routes must be registered BEFORE the parameterized
+    # /invoices/{invoice_id} routes, otherwise FastAPI matches "bulk" as an
+    # invoice_id and returns a 404/400 before reaching the bulk handler.
+
+    @app.post("/invoices/bulk/send", tags=["Invoices"])
+    def bulk_mark_sent(req: dict):
+        """Mark multiple invoices as sent."""
+        svc = _get_service()
+        return svc.bulk_mark_sent(req.get("invoice_ids", []))
+
+    @app.post("/invoices/bulk/pay", tags=["Invoices"])
+    def bulk_mark_paid(req: dict):
+        """Mark multiple invoices as paid."""
+        svc = _get_service()
+        return svc.bulk_mark_paid(req.get("invoice_ids", []))
+
+    @app.post("/invoices/bulk/cancel", tags=["Invoices"])
+    def bulk_cancel(req: dict):
+        """Cancel multiple invoices."""
+        svc = _get_service()
+        return svc.bulk_cancel(req.get("invoice_ids", []))
+
+    @app.post("/invoices/bulk/export", tags=["Invoices"])
+    def bulk_export(req: dict):
+        """Export multiple invoices."""
+        svc = _get_service()
+        return svc.bulk_export(req.get("invoice_ids", []), req.get("format", "markdown"))
 
     @app.post("/invoices", status_code=201)
     def create_invoice(req: InvoiceCreateRequest):
@@ -813,7 +841,7 @@ def create_app() -> FastAPI:
         data["total"] = est.total
         return data
 
-    @app.post("/estimates", tags=["Estimates"])
+    @app.post("/estimates", status_code=201, tags=["Estimates"])
     def create_estimate(req: dict):
         """Create a new estimate/quote.
 
@@ -922,5 +950,147 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Estimate '{estimate_id}' not found")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/estimates/{estimate_id}/pdf", tags=["Estimates"])
+    def export_estimate_pdf(estimate_id: str, req: Optional[dict] = None):
+        """Export an estimate as a PDF and return the file path."""
+        svc = _get_service()
+        req = req or {}
+        try:
+            path = svc.export_estimate_pdf(
+                estimate_id,
+                output_path=req.get("output_path"),
+                company_name=req.get("company_name"),
+                company_address=req.get("company_address"),
+                company_email=req.get("company_email"),
+            )
+            return {"estimate_id": estimate_id, "pdf_path": path}
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # --- v0.7.0: Expenses ---
+
+    @app.post("/expenses", status_code=201, tags=["Expenses"])
+    def create_expense(req: dict):
+        """Create a new expense."""
+        svc = _get_service()
+        try:
+            from datetime import date as date_type
+            exp_date = None
+            if "expense_date" in req:
+                exp_date = date_type.fromisoformat(req["expense_date"])
+            exp = svc.create_expense(
+                description=req["description"],
+                amount=req["amount"],
+                currency=req.get("currency", "USD"),
+                category=req.get("category", "other"),
+                vendor=req.get("vendor"),
+                expense_date=exp_date,
+                payment_method=req.get("payment_method"),
+                reference=req.get("reference"),
+                notes=req.get("notes"),
+                tax_deductible=req.get("tax_deductible", True),
+            )
+            return exp.model_dump(mode="json")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/expenses", tags=["Expenses"])
+    def list_expenses(
+        category: Optional[str] = Query(None),
+        currency: Optional[str] = Query(None),
+        date_from: Optional[str] = Query(None),
+        date_to: Optional[str] = Query(None),
+        vendor: Optional[str] = Query(None),
+    ):
+        """List expenses with optional filters."""
+        svc = _get_service()
+        from datetime import date as date_type
+        df = date_type.fromisoformat(date_from) if date_from else None
+        dt = date_type.fromisoformat(date_to) if date_to else None
+        expenses = svc.list_expenses(category=category, currency=currency, date_from=df, date_to=dt, vendor=vendor)
+        return [e.model_dump(mode="json") for e in expenses]
+
+    @app.get("/expenses/summary", tags=["Expenses"])
+    def expense_summary(
+        currency: Optional[str] = Query(None),
+        date_from: Optional[str] = Query(None),
+        date_to: Optional[str] = Query(None),
+    ):
+        """Get expense summary by category."""
+        svc = _get_service()
+        from datetime import date as date_type
+        df = date_type.fromisoformat(date_from) if date_from else None
+        dt = date_type.fromisoformat(date_to) if date_to else None
+        return svc.expense_summary(currency=currency, date_from=df, date_to=dt)
+
+    @app.get("/expenses/{expense_id}", tags=["Expenses"])
+    def get_expense(expense_id: str):
+        """Get a specific expense."""
+        svc = _get_service()
+        exp = svc.get_expense(expense_id)
+        if not exp:
+            raise HTTPException(status_code=404, detail=f"Expense '{expense_id}' not found")
+        return exp.model_dump(mode="json")
+
+    @app.put("/expenses/{expense_id}", tags=["Expenses"])
+    def update_expense(expense_id: str, req: dict):
+        """Update an expense."""
+        svc = _get_service()
+        try:
+            exp = svc.update_expense(
+                expense_id=expense_id,
+                description=req.get("description"),
+                amount=req.get("amount"),
+                category=req.get("category"),
+                vendor=req.get("vendor"),
+                payment_method=req.get("payment_method"),
+                notes=req.get("notes"),
+                tax_deductible=req.get("tax_deductible"),
+            )
+            return exp.model_dump(mode="json")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.delete("/expenses/{expense_id}", tags=["Expenses"])
+    def delete_expense(expense_id: str):
+        """Delete an expense."""
+        svc = _get_service()
+        if svc.remove_expense(expense_id):
+            return {"deleted": True}
+        raise HTTPException(status_code=404, detail=f"Expense '{expense_id}' not found")
+
+    # --- v0.7.0: Reports (Profit + Tax) ---
+
+    @app.get("/reports/profit", tags=["Reports"])
+    def profit_report(
+        period_start: Optional[str] = Query(None),
+        period_end: Optional[str] = Query(None),
+        currency: str = Query("USD"),
+    ):
+        """Get profit analysis (revenue minus expenses)."""
+        svc = _get_service()
+        from datetime import date as date_type
+        ps = date_type.fromisoformat(period_start) if period_start else None
+        pe = date_type.fromisoformat(period_end) if period_end else None
+        analysis = svc.get_profit_analysis(period_start=ps, period_end=pe, currency=currency)
+        return analysis.model_dump(mode="json")
+
+    @app.get("/reports/tax-summary", tags=["Reports"])
+    def tax_summary_report(
+        period_start: str = Query(...),
+        period_end: str = Query(...),
+        currency: Optional[str] = Query(None),
+    ):
+        """Generate a tax summary report."""
+        svc = _get_service()
+        from datetime import date as date_type
+        try:
+            ps = date_type.fromisoformat(period_start)
+            pe = date_type.fromisoformat(period_end)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        report = svc.generate_tax_summary(period_start=ps, period_end=pe, currency=currency)
+        return report.model_dump(mode="json")
 
     return app

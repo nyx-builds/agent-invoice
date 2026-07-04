@@ -1098,6 +1098,181 @@ async def list_tools() -> list[Tool]:
                 "required": ["estimate_id"],
             },
         ),
+        # --- v0.7.0: Expenses ---
+        Tool(
+            name="create_expense",
+            description="Record a business expense (cost incurred by the agent). Tracks costs like software subscriptions, API calls, contractors, infrastructure, etc.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Description of the expense"},
+                    "amount": {"type": "number", "description": "Expense amount (must be positive)"},
+                    "currency": {"type": "string", "description": "Currency code (default USD)"},
+                    "category": {"type": "string", "description": "Category: software, api_costs, infrastructure, contractors, marketing, travel, office, legal, insurance, bank_fees, taxes, other", "default": "other"},
+                    "vendor": {"type": "string", "description": "Who the expense was paid to"},
+                    "expense_date": {"type": "string", "description": "Date in YYYY-MM-DD format (defaults to today)"},
+                    "payment_method": {"type": "string", "description": "e.g. credit_card, bank_transfer, crypto"},
+                    "reference": {"type": "string", "description": "External reference number"},
+                    "notes": {"type": "string"},
+                    "tax_deductible": {"type": "boolean", "default": "true"},
+                },
+                "required": ["description", "amount"],
+            },
+        ),
+        Tool(
+            name="list_expenses",
+            description="List expenses with optional filters (category, currency, date range, vendor).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Filter by category"},
+                    "currency": {"type": "string"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "vendor": {"type": "string", "description": "Filter by vendor name (partial match)"},
+                },
+            },
+        ),
+        Tool(
+            name="get_expense",
+            description="Get details of a specific expense by ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "expense_id": {"type": "string"},
+                },
+                "required": ["expense_id"],
+            },
+        ),
+        Tool(
+            name="update_expense",
+            description="Update an existing expense.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "expense_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "amount": {"type": "number"},
+                    "category": {"type": "string"},
+                    "vendor": {"type": "string"},
+                    "payment_method": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "tax_deductible": {"type": "boolean"},
+                },
+                "required": ["expense_id"],
+            },
+        ),
+        Tool(
+            name="remove_expense",
+            description="Remove an expense.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "expense_id": {"type": "string"},
+                },
+                "required": ["expense_id"],
+            },
+        ),
+        Tool(
+            name="expense_summary",
+            description="Get a summary of expenses broken down by category.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "currency": {"type": "string"},
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
+                },
+            },
+        ),
+        # --- v0.7.0: Profit Analysis ---
+        Tool(
+            name="get_profit_analysis",
+            description="Analyze profitability: revenue from collected payments minus expenses. Includes per-client profitability breakdown and expense breakdown by category.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period_start": {"type": "string", "description": "Start date (YYYY-MM-DD). Default: all-time"},
+                    "period_end": {"type": "string", "description": "End date (YYYY-MM-DD). Default: today"},
+                    "currency": {"type": "string", "description": "Currency to analyze (default USD)"},
+                },
+            },
+        ),
+        # --- v0.7.0: Tax Summary ---
+        Tool(
+            name="generate_tax_summary",
+            description="Generate a tax summary report for a period: total invoiced, tax collected (all and from paid invoices), effective rate, breakdown by tax rate, and deductible expenses.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period_start": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "period_end": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Filter by currency (default: all)"},
+                },
+                "required": ["period_start", "period_end"],
+            },
+        ),
+        # --- v0.7.0: Bulk Operations ---
+        Tool(
+            name="bulk_mark_sent",
+            description="Mark multiple invoices as sent at once. Only draft invoices can be sent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["invoice_ids"],
+            },
+        ),
+        Tool(
+            name="bulk_mark_paid",
+            description="Mark multiple invoices as paid at once.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["invoice_ids"],
+            },
+        ),
+        Tool(
+            name="bulk_cancel",
+            description="Cancel multiple invoices at once.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["invoice_ids"],
+            },
+        ),
+        Tool(
+            name="bulk_export",
+            description="Export multiple invoices at once (markdown or JSON).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "invoice_ids": {"type": "array", "items": {"type": "string"}},
+                    "format": {"type": "string", "description": "markdown or json", "default": "markdown"},
+                },
+                "required": ["invoice_ids"],
+            },
+        ),
+        Tool(
+            name="export_estimate_pdf",
+            description="Export an estimate/quote as a professional PDF file. Returns the file path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "estimate_id": {"type": "string"},
+                    "output_path": {"type": "string", "description": "Custom output path (optional)"},
+                    "company_name": {"type": "string"},
+                    "company_address": {"type": "string"},
+                    "company_email": {"type": "string"},
+                },
+                "required": ["estimate_id"],
+            },
+        ),
     ]
 
 
@@ -1872,6 +2047,174 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return _text_result(f"Estimate '{arguments['estimate_id']}' not found.")
         except ValueError as e:
             return _text_result(f"Error: {e}")
+
+    # --- v0.7.0: Expenses ---
+
+    elif name == "create_expense":
+        try:
+            from datetime import date as date_type
+            exp_date = None
+            if "expense_date" in arguments:
+                try:
+                    exp_date = date_type.fromisoformat(arguments["expense_date"])
+                except ValueError:
+                    return _text_result(f"Error: Invalid date format: {arguments['expense_date']}. Use YYYY-MM-DD.")
+            exp = svc.create_expense(
+                description=arguments["description"],
+                amount=arguments["amount"],
+                currency=arguments.get("currency", "USD"),
+                category=arguments.get("category", "other"),
+                vendor=arguments.get("vendor"),
+                expense_date=exp_date,
+                payment_method=arguments.get("payment_method"),
+                reference=arguments.get("reference"),
+                notes=arguments.get("notes"),
+                tax_deductible=arguments.get("tax_deductible", True),
+            )
+            return _json_result({
+                "id": exp.id,
+                "description": exp.description,
+                "amount": exp.amount,
+                "currency": exp.currency,
+                "category": exp.category.value,
+                "vendor": exp.vendor,
+                "expense_date": str(exp.expense_date),
+                "tax_deductible": exp.tax_deductible,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_expenses":
+        from datetime import date as date_type
+        date_from = None
+        date_to = None
+        if "date_from" in arguments:
+            date_from = date_type.fromisoformat(arguments["date_from"])
+        if "date_to" in arguments:
+            date_to = date_type.fromisoformat(arguments["date_to"])
+        expenses = svc.list_expenses(
+            category=arguments.get("category"),
+            currency=arguments.get("currency"),
+            date_from=date_from,
+            date_to=date_to,
+            vendor=arguments.get("vendor"),
+        )
+        result = []
+        for e in expenses:
+            result.append({
+                "id": e.id,
+                "description": e.description,
+                "amount": e.amount,
+                "currency": e.currency,
+                "category": e.category.value,
+                "vendor": e.vendor,
+                "expense_date": str(e.expense_date),
+                "tax_deductible": e.tax_deductible,
+            })
+        return _json_result(result)
+
+    elif name == "get_expense":
+        exp = svc.get_expense(arguments["expense_id"])
+        if not exp:
+            return _text_result(f"Expense not found: {arguments['expense_id']}")
+        return _json_result(exp.model_dump(mode="json"))
+
+    elif name == "update_expense":
+        try:
+            exp = svc.update_expense(
+                expense_id=arguments["expense_id"],
+                description=arguments.get("description"),
+                amount=arguments.get("amount"),
+                category=arguments.get("category"),
+                vendor=arguments.get("vendor"),
+                payment_method=arguments.get("payment_method"),
+                notes=arguments.get("notes"),
+                tax_deductible=arguments.get("tax_deductible"),
+            )
+            return _json_result({
+                "id": exp.id,
+                "description": exp.description,
+                "amount": exp.amount,
+                "category": exp.category.value,
+                "updated": True,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_expense":
+        if svc.remove_expense(arguments["expense_id"]):
+            return _text_result(f"Expense '{arguments['expense_id']}' removed.")
+        return _text_result(f"Expense '{arguments['expense_id']}' not found.")
+
+    elif name == "expense_summary":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        summary = svc.expense_summary(
+            currency=arguments.get("currency"),
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return _json_result(summary)
+
+    # --- v0.7.0: Profit Analysis ---
+
+    elif name == "get_profit_analysis":
+        from datetime import date as date_type
+        period_start = date_type.fromisoformat(arguments["period_start"]) if "period_start" in arguments else None
+        period_end = date_type.fromisoformat(arguments["period_end"]) if "period_end" in arguments else None
+        analysis = svc.get_profit_analysis(
+            period_start=period_start,
+            period_end=period_end,
+            currency=arguments.get("currency", "USD"),
+        )
+        return _json_result(analysis.model_dump(mode="json"))
+
+    # --- v0.7.0: Tax Summary ---
+
+    elif name == "generate_tax_summary":
+        from datetime import date as date_type
+        try:
+            period_start = date_type.fromisoformat(arguments["period_start"])
+            period_end = date_type.fromisoformat(arguments["period_end"])
+        except (ValueError, KeyError) as e:
+            return _text_result(f"Error: Invalid date format. Use YYYY-MM-DD. ({e})")
+        report = svc.generate_tax_summary(
+            period_start=period_start,
+            period_end=period_end,
+            currency=arguments.get("currency"),
+        )
+        return _json_result(report.model_dump(mode="json"))
+
+    # --- v0.7.0: Bulk Operations ---
+
+    elif name == "bulk_mark_sent":
+        results = svc.bulk_mark_sent(arguments["invoice_ids"])
+        return _json_result(results)
+
+    elif name == "bulk_mark_paid":
+        results = svc.bulk_mark_paid(arguments["invoice_ids"])
+        return _json_result(results)
+
+    elif name == "bulk_cancel":
+        results = svc.bulk_cancel(arguments["invoice_ids"])
+        return _json_result(results)
+
+    elif name == "bulk_export":
+        results = svc.bulk_export(arguments["invoice_ids"], arguments.get("format", "markdown"))
+        return _json_result(results)
+
+    # --- v0.7.0: Estimate PDF Export ---
+
+    elif name == "export_estimate_pdf":
+        path = svc.export_estimate_pdf(
+            arguments["estimate_id"],
+            output_path=arguments.get("output_path"),
+            company_name=arguments.get("company_name"),
+            company_address=arguments.get("company_address"),
+            company_email=arguments.get("company_email"),
+        )
+        return _json_result({"estimate_id": arguments["estimate_id"], "pdf_path": path})
 
     return _text_result(f"Unknown tool: {name}")
 

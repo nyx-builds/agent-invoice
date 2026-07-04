@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from typing import Optional
 
 import click
 from rich.console import Console
 from rich.table import Table
 
-from .models import CURRENCIES, BUILTIN_TEMPLATES, DunningLevel, InvoiceStatus, RecurrenceFrequency, format_amount, get_currency_symbol
+from .models import CURRENCIES, BUILTIN_TEMPLATES, DunningLevel, ExpenseCategory, InvoiceStatus, RecurrenceFrequency, format_amount, get_currency_symbol
 from .service import InvoiceService
 from .store import InvoiceStore
 from . import __version__
@@ -19,6 +20,9 @@ console = Console()
 
 def get_service() -> InvoiceService:
     return InvoiceService(InvoiceStore())
+
+
+_get_service = get_service
 
 
 @click.group()
@@ -1530,6 +1534,375 @@ def estimate_delete(estimate_id):
     else:
         console.print(f"[red]Estimate '{estimate_id}' not found.[/red]")
         sys.exit(1)
+
+
+@estimate_group.command("export")
+@click.argument("estimate_id")
+@click.option("--format", "fmt", default="markdown",
+              type=click.Choice(["markdown", "json", "pdf"]),
+              help="Export format (default: markdown)")
+@click.option("--output", "-o", help="Output file path (PDF only)")
+@click.option("--company-name", help="Company name for PDF header")
+@click.option("--company-address", help="Company address for PDF header")
+@click.option("--company-email", help="Company email for PDF header")
+def estimate_export(estimate_id, fmt, output, company_name, company_address, company_email):
+    """Export an estimate to markdown, JSON, or PDF."""
+    svc = get_service()
+    est = svc.get_estimate(estimate_id)
+    if not est:
+        console.print(f"[red]Estimate '{estimate_id}' not found.[/red]")
+        sys.exit(1)
+
+    if fmt == "pdf":
+        path = svc.export_estimate_pdf(
+            estimate_id,
+            output_path=output,
+            company_name=company_name,
+            company_address=company_address,
+            company_email=company_email,
+        )
+        console.print(f"[green]✓ PDF saved to: {path}[/green]")
+    elif fmt == "json":
+        console.print(est.model_dump_json(indent=2))
+    else:
+        console.print(est.to_markdown())
+
+
+# --- Expenses (v0.7.0) ---
+
+@main.group("expense")
+def expense_group():
+    """Manage business expenses (costs incurred by the agent)."""
+    pass
+
+
+@expense_group.command("create")
+@click.option("--description", "-d", required=True, help="Description of the expense")
+@click.option("--amount", "-a", required=True, type=float, help="Expense amount")
+@click.option("--currency", default="USD", help="Currency code (default USD)")
+@click.option("--category", "-c", default="other",
+              type=click.Choice([c.value for c in ExpenseCategory]),
+              help="Expense category")
+@click.option("--vendor", "-v", help="Vendor/supplier name")
+@click.option("--date", "expense_date_str", help="Expense date (YYYY-MM-DD, default today)")
+@click.option("--payment-method", help="Payment method (e.g. credit_card, bank_transfer)")
+@click.option("--reference", help="External reference number")
+@click.option("--notes", help="Additional notes")
+@click.option("--non-deductible", is_flag=True, help="Mark as non-tax-deductible")
+def expense_create(description, amount, currency, category, vendor, expense_date_str, payment_method, reference, notes, non_deductible):
+    """Record a new business expense."""
+    svc = _get_service()
+    exp_date = None
+    if expense_date_str:
+        try:
+            exp_date = date.fromisoformat(expense_date_str)
+        except ValueError:
+            console.print(f"[red]Invalid date format: {expense_date_str}. Use YYYY-MM-DD.[/red]")
+            sys.exit(1)
+    try:
+        exp = svc.create_expense(
+            description=description,
+            amount=amount,
+            currency=currency,
+            category=category,
+            vendor=vendor,
+            expense_date=exp_date,
+            payment_method=payment_method,
+            reference=reference,
+            notes=notes,
+            tax_deductible=not non_deductible,
+        )
+        console.print(f"[green]Expense created:[/green] {exp.id}")
+        console.print(f"  Description: {exp.description}")
+        console.print(f"  Amount: {format_amount(exp.amount, exp.currency)} ({exp.currency})")
+        console.print(f"  Category: {exp.category.value}")
+        if exp.vendor:
+            console.print(f"  Vendor: {exp.vendor}")
+        console.print(f"  Date: {exp.expense_date}")
+        console.print(f"  Tax deductible: {'Yes' if exp.tax_deductible else 'No'}")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@expense_group.command("list")
+@click.option("--category", "-c", help="Filter by category")
+@click.option("--currency", help="Filter by currency")
+@click.option("--date-from", help="Start date (YYYY-MM-DD)")
+@click.option("--date-to", help="End date (YYYY-MM-DD)")
+@click.option("--vendor", help="Filter by vendor (partial match)")
+def expense_list(category, currency, date_from, date_to, vendor):
+    """List expenses with optional filters."""
+    svc = _get_service()
+    df = date.fromisoformat(date_from) if date_from else None
+    dt = date.fromisoformat(date_to) if date_to else None
+    expenses = svc.list_expenses(category=category, currency=currency, date_from=df, date_to=dt, vendor=vendor)
+    if not expenses:
+        console.print("[yellow]No expenses found.[/yellow]")
+        return
+    total = sum(e.amount for e in expenses)
+    console.print(f"\n[bold]Expenses ({len(expenses)} found)[/bold]\n")
+    table = Table(show_header=True, header_style="bold blue")
+    table.add_column("ID", style="cyan")
+    table.add_column("Date")
+    table.add_column("Description")
+    table.add_column("Category")
+    table.add_column("Amount", justify="right")
+    table.add_column("Vendor")
+    table.add_column("Deductible", justify="center")
+    for e in expenses:
+        sym = get_currency_symbol(e.currency)
+        table.add_row(
+            e.id,
+            str(e.expense_date),
+            e.description[:40],
+            e.category.value,
+            f"{sym}{e.amount:,.2f}",
+            e.vendor or "—",
+            "✓" if e.tax_deductible else "✗",
+        )
+    console.print(table)
+    console.print(f"\n[bold]Total: {format_amount(total, expenses[0].currency)}[/bold]")
+
+
+@expense_group.command("show")
+@click.argument("expense_id")
+def expense_show(expense_id):
+    """Show details of a specific expense."""
+    svc = _get_service()
+    exp = svc.get_expense(expense_id)
+    if not exp:
+        console.print(f"[red]Expense '{expense_id}' not found.[/red]")
+        sys.exit(1)
+    sym = get_currency_symbol(exp.currency)
+    console.print(f"\n[bold cyan]Expense {exp.id}[/bold cyan]")
+    console.print(f"  Description: {exp.description}")
+    console.print(f"  Amount: {sym}{exp.amount:,.2f} ({exp.currency})")
+    console.print(f"  Category: {exp.category.value}")
+    console.print(f"  Date: {exp.expense_date}")
+    if exp.vendor:
+        console.print(f"  Vendor: {exp.vendor}")
+    if exp.payment_method:
+        console.print(f"  Payment method: {exp.payment_method}")
+    if exp.reference:
+        console.print(f"  Reference: {exp.reference}")
+    console.print(f"  Tax deductible: {'Yes' if exp.tax_deductible else 'No'}")
+    if exp.notes:
+        console.print(f"  Notes: {exp.notes}")
+
+
+@expense_group.command("remove")
+@click.argument("expense_id")
+def expense_remove(expense_id):
+    """Remove an expense."""
+    svc = _get_service()
+    if svc.remove_expense(expense_id):
+        console.print(f"[green]Expense '{expense_id}' removed.[/green]")
+    else:
+        console.print(f"[red]Expense '{expense_id}' not found.[/red]")
+        sys.exit(1)
+
+
+@expense_group.command("summary")
+@click.option("--currency", help="Filter by currency")
+@click.option("--date-from", help="Start date (YYYY-MM-DD)")
+@click.option("--date-to", help="End date (YYYY-MM-DD)")
+def expense_summary_cmd(currency, date_from, date_to):
+    """Show expense summary broken down by category."""
+    svc = _get_service()
+    df = date.fromisoformat(date_from) if date_from else None
+    dt = date.fromisoformat(date_to) if date_to else None
+    summary = svc.expense_summary(currency=currency, date_from=df, date_to=dt)
+    console.print(f"\n[bold]Expense Summary ({summary['currency']})[/bold]\n")
+    total_str = format_amount(summary["total"], summary["currency"]) if summary["currency"] != "ALL" else f"${summary['total']:,.2f}"
+    console.print(f"  Total: {total_str}")
+    console.print(f"  Expense count: {summary['expense_count']}\n")
+    if summary["breakdown"]:
+        table = Table(show_header=True, header_style="bold blue")
+        table.add_column("Category", style="cyan")
+        table.add_column("Count", justify="right")
+        table.add_column("Amount", justify="right")
+        table.add_column("% of Total", justify="right")
+        for item in summary["breakdown"]:
+            table.add_row(
+                item["category"],
+                str(item["count"]),
+                f"${item['amount']:,.2f}",
+                f"{item['percentage']}%",
+            )
+        console.print(table)
+
+
+# --- Profit Analysis (v0.7.0) ---
+
+@main.command("profit")
+@click.option("--period-start", help="Start date (YYYY-MM-DD). Default: all-time")
+@click.option("--period-end", help="End date (YYYY-MM-DD). Default: today")
+@click.option("--currency", default="USD", help="Currency to analyze (default USD)")
+def profit_analysis(period_start, period_end, currency):
+    """Analyze profitability: revenue from collected payments minus expenses."""
+    svc = _get_service()
+    ps = date.fromisoformat(period_start) if period_start else None
+    pe = date.fromisoformat(period_end) if period_end else None
+    analysis = svc.get_profit_analysis(period_start=ps, period_end=pe, currency=currency)
+    sym = get_currency_symbol(currency)
+    console.print(f"\n[bold cyan]Profit Analysis ({currency})[/bold cyan]")
+    if analysis.period_start or analysis.period_end:
+        console.print(f"  Period: {analysis.period_start or 'beginning'} → {analysis.period_end or 'today'}")
+    console.print()
+    console.print(f"  Total Revenue (collected): [green]{sym}{analysis.total_revenue:,.2f}[/green]")
+    console.print(f"  Total Expenses:            [red]{sym}{analysis.total_expenses:,.2f}[/red]")
+    console.print(f"  Gross Profit:              [bold]{'[green]' if analysis.gross_profit >= 0 else '[red]'}{sym}{analysis.gross_profit:,.2f}[/bold]")
+    console.print(f"  Gross Margin:              {analysis.gross_margin}%")
+
+    if analysis.expense_breakdown:
+        console.print(f"\n[bold]Expense Breakdown[/bold]\n")
+        table = Table(show_header=True, header_style="bold blue")
+        table.add_column("Category", style="cyan")
+        table.add_column("Amount", justify="right")
+        table.add_column("% of Expenses", justify="right")
+        for item in analysis.expense_breakdown:
+            table.add_row(
+                item["category"],
+                f"{sym}{item['amount']:,.2f}",
+                f"{item['percentage']}%",
+            )
+        console.print(table)
+
+    if analysis.client_profitability:
+        console.print(f"\n[bold]Client Profitability[/bold]\n")
+        table = Table(show_header=True, header_style="bold blue")
+        table.add_column("Client", style="cyan")
+        table.add_column("Collected", justify="right")
+        table.add_column("Direct Costs", justify="right")
+        table.add_column("Gross Profit", justify="right")
+        table.add_column("Margin", justify="right")
+        table.add_column("Invoices", justify="right")
+        for c in analysis.client_profitability:
+            profit_color = "green" if c.gross_profit >= 0 else "red"
+            table.add_row(
+                c.client_name or c.client_id,
+                f"{sym}{c.total_collected:,.2f}",
+                f"{sym}{c.direct_costs:,.2f}",
+                f"[{profit_color}]{sym}{c.gross_profit:,.2f}[/{profit_color}]",
+                f"{c.gross_margin}%",
+                str(c.invoice_count),
+            )
+        console.print(table)
+
+
+# --- Tax Summary (v0.7.0) ---
+
+@main.command("tax-report")
+@click.option("--period-start", required=True, help="Start date (YYYY-MM-DD)")
+@click.option("--period-end", required=True, help="End date (YYYY-MM-DD)")
+@click.option("--currency", help="Filter by currency (default: all)")
+def tax_report(period_start, period_end, currency):
+    """Generate a tax summary report for a period."""
+    svc = _get_service()
+    try:
+        ps = date.fromisoformat(period_start)
+        pe = date.fromisoformat(period_end)
+    except ValueError:
+        console.print("[red]Invalid date format. Use YYYY-MM-DD.[/red]")
+        sys.exit(1)
+    report = svc.generate_tax_summary(period_start=ps, period_end=pe, currency=currency)
+    curr_label = report.currency or "ALL"
+    console.print(f"\n[bold cyan]Tax Summary Report ({curr_label})[/bold cyan]")
+    console.print(f"  Period: {report.period_start} → {report.period_end}\n")
+    console.print(f"  Total Invoiced:         ${report.total_invoiced:,.2f}")
+    console.print(f"  Total Tax Collected:    ${report.total_tax_collected:,.2f}")
+    console.print(f"  Tax from Paid Invoices: ${report.total_tax_from_paid:,.2f}")
+    console.print(f"  Effective Tax Rate:     {report.effective_tax_rate}%")
+    console.print(f"  Deductible Expenses:    ${report.tax_deductible_expenses:,.2f}")
+    console.print(f"  Net Taxable Income:     ${report.net_taxable_income:,.2f}")
+
+    if report.tax_by_rate:
+        console.print(f"\n[bold]Tax Breakdown by Rate[/bold]\n")
+        table = Table(show_header=True, header_style="bold blue")
+        table.add_column("Rate", style="cyan")
+        table.add_column("Line Items", justify="right")
+        table.add_column("Subtotal", justify="right")
+        table.add_column("Tax Amount", justify="right")
+        for item in report.tax_by_rate:
+            table.add_row(
+                item["rate_label"],
+                str(item["count"]),
+                f"${item['subtotal']:,.2f}",
+                f"${item['tax_amount']:,.2f}",
+            )
+        console.print(table)
+
+
+# --- Bulk Operations (v0.7.0) ---
+
+@main.command("bulk-send")
+@click.argument("invoice_ids", nargs=-1)
+def bulk_send(invoice_ids):
+    """Mark multiple invoices as sent."""
+    if not invoice_ids:
+        console.print("[red]No invoice IDs provided.[/red]")
+        sys.exit(1)
+    svc = _get_service()
+    results = svc.bulk_mark_sent(list(invoice_ids))
+    console.print(f"[green]Sent: {len(results['success'])}[/green]")
+    if results["errors"]:
+        console.print(f"[red]Errors: {len(results['errors'])}[/red]")
+        for err in results["errors"]:
+            console.print(f"  {err['id']}: {err['error']}")
+
+
+@main.command("bulk-pay")
+@click.argument("invoice_ids", nargs=-1)
+def bulk_pay(invoice_ids):
+    """Mark multiple invoices as paid."""
+    if not invoice_ids:
+        console.print("[red]No invoice IDs provided.[/red]")
+        sys.exit(1)
+    svc = _get_service()
+    results = svc.bulk_mark_paid(list(invoice_ids))
+    console.print(f"[green]Paid: {len(results['success'])}[/green]")
+    if results["errors"]:
+        console.print(f"[red]Errors: {len(results['errors'])}[/red]")
+        for err in results["errors"]:
+            console.print(f"  {err['id']}: {err['error']}")
+
+
+@main.command("bulk-cancel")
+@click.argument("invoice_ids", nargs=-1)
+def bulk_cancel(invoice_ids):
+    """Cancel multiple invoices."""
+    if not invoice_ids:
+        console.print("[red]No invoice IDs provided.[/red]")
+        sys.exit(1)
+    svc = get_service()
+    results = svc.bulk_cancel(list(invoice_ids))
+    console.print(f"[green]Cancelled: {len(results['success'])}[/green]")
+    if results["errors"]:
+        console.print(f"[red]Errors: {len(results['errors'])}[/red]")
+        for err in results["errors"]:
+            console.print(f"  {err['id']}: {err['error']}")
+
+
+@main.command("bulk-export")
+@click.argument("invoice_ids", nargs=-1)
+@click.option("--format", "fmt", default="markdown",
+              type=click.Choice(["markdown", "json"]),
+              help="Export format (default: markdown)")
+def bulk_export(invoice_ids, fmt):
+    """Export multiple invoices to markdown or JSON."""
+    if not invoice_ids:
+        console.print("[red]No invoice IDs provided.[/red]")
+        sys.exit(1)
+    svc = get_service()
+    results = svc.bulk_export(list(invoice_ids), format=fmt)
+    for export in results["exports"]:
+        console.print(f"\n[bold]--- {export['id']} ({export['format']}) ---[/bold]")
+        console.print(export["content"])
+    if results["errors"]:
+        console.print(f"\n[red]Errors: {len(results['errors'])}[/red]")
+        for err in results["errors"]:
+            console.print(f"  {err['id']}: {err['error']}")
 
 
 # --- REST API serve ---

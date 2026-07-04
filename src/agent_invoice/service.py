@@ -12,6 +12,7 @@ from .models import (
     CURRENCIES,
     Client,
     ClientARAging,
+    ClientProfitability,
     ClientStatement,
     CreditNote,
     CreditNoteStatus,
@@ -21,6 +22,8 @@ from .models import (
     EarningsSummary,
     Estimate,
     EstimateStatus,
+    Expense,
+    ExpenseCategory,
     Invoice,
     InvoiceStatus,
     InvoiceTemplate,
@@ -28,9 +31,12 @@ from .models import (
     MonthlyRevenue,
     NumberingConfig,
     Payment,
+    ProfitAnalysis,
     RecurrenceFrequency,
     RecurringInvoice,
     RevenueAnalytics,
+    TaxLineItemSummary,
+    TaxSummaryReport,
     format_amount,
 )
 from .store import InvoiceStore
@@ -1596,3 +1602,499 @@ class InvoiceService:
         if est.status == EstimateStatus.CONVERTED:
             raise ValueError("Cannot remove a converted estimate.")
         return self.store.delete_estimate(estimate_id)
+
+    def export_estimate_pdf(
+        self,
+        estimate_id: str,
+        output_path: Optional[str] = None,
+        company_name: Optional[str] = None,
+        company_address: Optional[str] = None,
+        company_email: Optional[str] = None,
+    ) -> str:
+        """Export an estimate/quote as a PDF file.
+
+        Args:
+            estimate_id: The estimate ID to export.
+            output_path: Path to save the PDF. Auto-generated if None.
+            company_name: Your company name for the header.
+            company_address: Your company address.
+            company_email: Your company email.
+
+        Returns:
+            The path to the generated PDF file.
+        """
+        est = self.store.get_estimate(estimate_id)
+        if not est:
+            raise ValueError(f"Estimate '{estimate_id}' not found.")
+
+        from .pdf import generate_estimate_pdf
+        return generate_estimate_pdf(
+            estimate=est,
+            output_path=output_path,
+            company_name=company_name,
+            company_address=company_address,
+            company_email=company_email,
+        )
+
+    # -----------------------------------------------------------------------
+    # Expenses (v0.7.0)
+    # -----------------------------------------------------------------------
+
+    def create_expense(
+        self,
+        description: str,
+        amount: float,
+        currency: str = "USD",
+        category: ExpenseCategory | str = ExpenseCategory.OTHER,
+        vendor: Optional[str] = None,
+        expense_date: Optional[date] = None,
+        payment_method: Optional[str] = None,
+        reference: Optional[str] = None,
+        notes: Optional[str] = None,
+        tax_deductible: bool = True,
+    ) -> Expense:
+        """Create and save a new expense."""
+        if amount <= 0:
+            raise ValueError("Expense amount must be positive.")
+        if currency.upper() not in CURRENCIES:
+            raise ValueError(f"Unsupported currency: {currency}. Supported: {', '.join(sorted(CURRENCIES.keys()))}")
+        # Normalize category
+        if isinstance(category, str):
+            try:
+                category = ExpenseCategory(category.lower())
+            except ValueError:
+                raise ValueError(
+                    f"Invalid category '{category}'. Valid: {', '.join(c.value for c in ExpenseCategory)}"
+                )
+        expense = Expense(
+            description=description,
+            amount=round(amount, 2),
+            currency=currency.upper(),
+            category=category,
+            vendor=vendor,
+            expense_date=expense_date or date.today(),
+            payment_method=payment_method,
+            reference=reference,
+            notes=notes,
+            tax_deductible=tax_deductible,
+        )
+        return self.store.save_expense(expense)
+
+    def get_expense(self, expense_id: str) -> Optional[Expense]:
+        """Get an expense by ID."""
+        return self.store.get_expense(expense_id)
+
+    def list_expenses(
+        self,
+        category: Optional[ExpenseCategory | str] = None,
+        currency: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        vendor: Optional[str] = None,
+    ) -> list[Expense]:
+        """List expenses with optional filters."""
+        return self.store.list_expenses(
+            category=category,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            vendor=vendor,
+        )
+
+    def update_expense(
+        self,
+        expense_id: str,
+        description: Optional[str] = None,
+        amount: Optional[float] = None,
+        category: Optional[ExpenseCategory | str] = None,
+        vendor: Optional[str] = None,
+        payment_method: Optional[str] = None,
+        notes: Optional[str] = None,
+        tax_deductible: Optional[bool] = None,
+    ) -> Expense:
+        """Update an existing expense."""
+        expense = self.store.get_expense(expense_id)
+        if not expense:
+            raise ValueError(f"Expense '{expense_id}' not found.")
+        if description is not None:
+            expense.description = description
+        if amount is not None:
+            if amount <= 0:
+                raise ValueError("Expense amount must be positive.")
+            expense.amount = round(amount, 2)
+        if category is not None:
+            if isinstance(category, str):
+                try:
+                    category = ExpenseCategory(category.lower())
+                except ValueError:
+                    raise ValueError(
+                        f"Invalid category '{category}'. Valid: {', '.join(c.value for c in ExpenseCategory)}"
+                    )
+            expense.category = category
+        if vendor is not None:
+            expense.vendor = vendor
+        if payment_method is not None:
+            expense.payment_method = payment_method
+        if notes is not None:
+            expense.notes = notes
+        if tax_deductible is not None:
+            expense.tax_deductible = tax_deductible
+        expense.updated_at = datetime.now(tz=timezone.utc)
+        return self.store.save_expense(expense)
+
+    def remove_expense(self, expense_id: str) -> bool:
+        """Remove an expense."""
+        return self.store.delete_expense(expense_id)
+
+    def expense_summary(
+        self,
+        currency: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+    ) -> dict:
+        """Get a summary of expenses broken down by category."""
+        expenses = self.list_expenses(currency=currency, date_from=date_from, date_to=date_to)
+        total = round(sum(e.amount for e in expenses), 2)
+        by_category: dict[str, dict] = {}
+        for e in expenses:
+            cat = e.category.value
+            if cat not in by_category:
+                by_category[cat] = {"amount": 0.0, "count": 0}
+            by_category[cat]["amount"] = round(by_category[cat]["amount"] + e.amount, 2)
+            by_category[cat]["count"] += 1
+        # Add percentage
+        breakdown = []
+        for cat, data in sorted(by_category.items(), key=lambda x: -x[1]["amount"]):
+            pct = round(data["amount"] / total * 100, 1) if total > 0 else 0.0
+            breakdown.append({"category": cat, "amount": data["amount"], "count": data["count"], "percentage": pct})
+        return {
+            "total": total,
+            "expense_count": len(expenses),
+            "currency": currency or "ALL",
+            "breakdown": breakdown,
+        }
+
+    # -----------------------------------------------------------------------
+    # Profit Analysis (v0.7.0)
+    # -----------------------------------------------------------------------
+
+    def get_profit_analysis(
+        self,
+        period_start: Optional[date] = None,
+        period_end: Optional[date] = None,
+        currency: Optional[str] = "USD",
+    ) -> ProfitAnalysis:
+        """Analyze profitability: revenue from collected invoices minus expenses.
+
+        Args:
+            period_start: Start date filter (None = all-time).
+            period_end: End date filter (None = today).
+            currency: Filter by currency. Defaults to USD.
+        """
+        period_end = period_end or date.today()
+        currency = (currency or "USD").upper()
+
+        # Revenue: sum of all payments received within the period
+        invoices = self.list_invoices(currency=currency)
+        total_revenue = 0.0
+        for inv in invoices:
+            for pmt in inv.payments:
+                if period_start and pmt.payment_date < period_start:
+                    continue
+                if pmt.payment_date > period_end:
+                    continue
+                total_revenue += pmt.amount
+        total_revenue = round(total_revenue, 2)
+
+        # Expenses: sum of all expenses in the period
+        expenses = self.list_expenses(currency=currency, date_from=period_start, date_to=period_end)
+        total_expenses = round(sum(e.amount for e in expenses), 2)
+
+        # Expense breakdown by category
+        by_category: dict[str, dict] = {}
+        for e in expenses:
+            cat = e.category.value
+            if cat not in by_category:
+                by_category[cat] = {"amount": 0.0, "count": 0}
+            by_category[cat]["amount"] = round(by_category[cat]["amount"] + e.amount, 2)
+            by_category[cat]["count"] += 1
+        expense_breakdown = []
+        for cat, data in sorted(by_category.items(), key=lambda x: -x[1]["amount"]):
+            pct = round(data["amount"] / total_expenses * 100, 1) if total_expenses > 0 else 0.0
+            expense_breakdown.append({"category": cat, "amount": data["amount"], "count": data["count"], "percentage": pct})
+
+        # Gross profit and margin
+        gross_profit = round(total_revenue - total_expenses, 2)
+        gross_margin = round(gross_profit / total_revenue * 100, 1) if total_revenue > 0 else 0.0
+
+        # Per-client profitability
+        client_profitability = self._compute_client_profitability(
+            invoices=invoices,
+            expenses=expenses,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+        return ProfitAnalysis(
+            currency=currency,
+            period_start=period_start,
+            period_end=period_end,
+            total_revenue=total_revenue,
+            total_expenses=total_expenses,
+            gross_profit=gross_profit,
+            gross_margin=gross_margin,
+            expense_breakdown=expense_breakdown,
+            client_profitability=client_profitability,
+        )
+
+    def _compute_client_profitability(
+        self,
+        invoices: list[Invoice],
+        expenses: list[Expense],
+        period_start: Optional[date],
+        period_end: date,
+    ) -> list[ClientProfitability]:
+        """Compute per-client profitability."""
+        # Group invoices by client
+        client_map: dict[str, list[Invoice]] = {}
+        for inv in invoices:
+            client_map.setdefault(inv.client_id, []).append(inv)
+
+        # Build expense link map (by invoice_id if present)
+        expenses_by_invoice: dict[str, list[Expense]] = {}
+        for e in expenses:
+            if e.invoice_id:
+                expenses_by_invoice.setdefault(e.invoice_id, []).append(e)
+
+        results = []
+        for client_id, client_invs in client_map.items():
+            client_name = client_invs[0].client_name
+            total_invoiced = round(sum(inv.total for inv in client_invs), 2)
+            total_collected = 0.0
+            for inv in client_invs:
+                for pmt in inv.payments:
+                    if period_start and pmt.payment_date < period_start:
+                        continue
+                    if pmt.payment_date > period_end:
+                        continue
+                    total_collected += pmt.amount
+            total_collected = round(total_collected, 2)
+            total_outstanding = round(total_invoiced - sum(inv.amount_paid for inv in client_invs), 2)
+            # Direct costs: expenses linked to this client's invoices
+            direct_costs = 0.0
+            for inv in client_invs:
+                for e in expenses_by_invoice.get(inv.id, []):
+                    direct_costs += e.amount
+            direct_costs = round(direct_costs, 2)
+            gross_profit = round(total_collected - direct_costs, 2)
+            gross_margin = round(gross_profit / total_collected * 100, 1) if total_collected > 0 else 0.0
+            paid_count = sum(1 for inv in client_invs if inv.status == InvoiceStatus.PAID)
+            avg_val = round(total_invoiced / len(client_invs), 2) if client_invs else 0.0
+
+            results.append(ClientProfitability(
+                client_id=client_id,
+                client_name=client_name,
+                currency=invoices[0].currency if invoices else "USD",
+                total_invoiced=total_invoiced,
+                total_collected=total_collected,
+                total_outstanding=total_outstanding,
+                direct_costs=direct_costs,
+                gross_revenue=total_collected,
+                gross_profit=gross_profit,
+                gross_margin=gross_margin,
+                invoice_count=len(client_invs),
+                paid_invoice_count=paid_count,
+                avg_invoice_value=avg_val,
+            ))
+
+        # Sort by gross profit descending
+        results.sort(key=lambda c: -c.gross_profit)
+        return results
+
+    # -----------------------------------------------------------------------
+    # Tax Summary Report (v0.7.0)
+    # -----------------------------------------------------------------------
+
+    def generate_tax_summary(
+        self,
+        period_start: date,
+        period_end: date,
+        currency: Optional[str] = None,
+    ) -> TaxSummaryReport:
+        """Generate a tax summary report for a given period.
+
+        Shows total invoiced, tax collected (all invoices and from paid invoices only),
+        effective tax rate, tax breakdown by rate, and deductible expenses.
+        """
+        invoices = self.list_invoices(currency=currency)
+
+        # Filter invoices by issue date within the period
+        period_invoices = []
+        for inv in invoices:
+            if inv.issue_date < period_start or inv.issue_date > period_end:
+                continue
+            period_invoices.append(inv)
+
+        total_invoiced = 0.0
+        total_tax_collected = 0.0
+        total_tax_from_paid = 0.0
+        tax_by_rate_map: dict[str, dict] = {}
+        invoice_details = []
+
+        for inv in period_invoices:
+            inv_subtotal = inv.subtotal
+            inv_tax = inv.total_tax
+            total_invoiced += inv_subtotal
+            total_tax_collected += inv_tax
+            if inv.status == InvoiceStatus.PAID:
+                total_tax_from_paid += inv_tax
+
+            # Compute blended tax rate for this invoice
+            blended_rate = round(inv_tax / inv_subtotal * 100, 2) if inv_subtotal > 0 else 0.0
+            invoice_details.append(TaxLineItemSummary(
+                invoice_id=inv.id,
+                client_name=inv.client_name,
+                issue_date=inv.issue_date,
+                subtotal=inv_subtotal,
+                tax_amount=inv_tax,
+                tax_rate=blended_rate,
+                currency=inv.currency,
+            ))
+
+            # Aggregate by per-line-item tax rates
+            for item in inv.line_items:
+                rate_key = f"{item.tax_rate:.1f}%"
+                if rate_key not in tax_by_rate_map:
+                    tax_by_rate_map[rate_key] = {"rate": item.tax_rate, "count": 0, "tax_amount": 0.0, "subtotal": 0.0}
+                tax_by_rate_map[rate_key]["count"] += 1
+                tax_by_rate_map[rate_key]["tax_amount"] = round(tax_by_rate_map[rate_key]["tax_amount"] + (item.tax_amount or 0), 2)
+                tax_by_rate_map[rate_key]["subtotal"] = round(tax_by_rate_map[rate_key]["subtotal"] + (item.total or 0), 2)
+
+        total_invoiced = round(total_invoiced, 2)
+        total_tax_collected = round(total_tax_collected, 2)
+        total_tax_from_paid = round(total_tax_from_paid, 2)
+        effective_tax_rate = round(total_tax_collected / total_invoiced * 100, 2) if total_invoiced > 0 else 0.0
+
+        tax_by_rate = []
+        for rate_key, data in sorted(tax_by_rate_map.items(), key=lambda x: -x[1]["tax_amount"]):
+            tax_by_rate.append({
+                "rate_label": rate_key,
+                "rate": data["rate"],
+                "count": data["count"],
+                "tax_amount": data["tax_amount"],
+                "subtotal": data["subtotal"],
+            })
+
+        # Deductible expenses in the period
+        expenses = self.list_expenses(currency=currency, date_from=period_start, date_to=period_end)
+        tax_deductible_expenses = round(sum(e.amount for e in expenses if e.tax_deductible), 2)
+        net_taxable = round(total_invoiced - tax_deductible_expenses, 2)
+
+        return TaxSummaryReport(
+            period_start=period_start,
+            period_end=period_end,
+            currency=currency,
+            total_invoiced=total_invoiced,
+            total_tax_collected=total_tax_collected,
+            total_tax_from_paid=total_tax_from_paid,
+            effective_tax_rate=effective_tax_rate,
+            tax_by_rate=tax_by_rate,
+            invoice_details=invoice_details,
+            tax_deductible_expenses=tax_deductible_expenses,
+            net_taxable_income=net_taxable,
+        )
+
+    # -----------------------------------------------------------------------
+    # Bulk Operations (v0.7.0)
+    # -----------------------------------------------------------------------
+
+    def bulk_mark_sent(self, invoice_ids: list[str]) -> dict:
+        """Mark multiple invoices as sent.
+
+        Returns: {"success": [...], "errors": [{"id": ..., "error": "..."}]}
+        """
+        results: dict = {"success": [], "errors": []}
+        for inv_id in invoice_ids:
+            inv = self.store.get_invoice(inv_id)
+            if not inv:
+                results["errors"].append({"id": inv_id, "error": "Invoice not found."})
+                continue
+            try:
+                if inv.status != InvoiceStatus.DRAFT:
+                    results["errors"].append({"id": inv_id, "error": f"Cannot mark as sent: status is '{inv.status.value}' (must be draft)."})
+                    continue
+                inv.mark_sent()
+                self.store.save_invoice(inv)
+                results["success"].append(inv_id)
+            except Exception as exc:
+                results["errors"].append({"id": inv_id, "error": str(exc)})
+        return results
+
+    def bulk_mark_paid(self, invoice_ids: list[str]) -> dict:
+        """Mark multiple invoices as paid.
+
+        Returns: {"success": [...], "errors": [{"id": ..., "error": "..."}]}
+        """
+        results: dict = {"success": [], "errors": []}
+        for inv_id in invoice_ids:
+            inv = self.store.get_invoice(inv_id)
+            if not inv:
+                results["errors"].append({"id": inv_id, "error": "Invoice not found."})
+                continue
+            try:
+                if inv.status in (InvoiceStatus.PAID, InvoiceStatus.CANCELLED):
+                    results["errors"].append({"id": inv_id, "error": f"Cannot mark as paid: status is '{inv.status.value}'."})
+                    continue
+                inv.mark_paid()
+                self.store.save_invoice(inv)
+                results["success"].append(inv_id)
+            except Exception as exc:
+                results["errors"].append({"id": inv_id, "error": str(exc)})
+        return results
+
+    def bulk_cancel(self, invoice_ids: list[str]) -> dict:
+        """Cancel multiple invoices.
+
+        Returns: {"success": [...], "errors": [{"id": ..., "error": "..."}]}
+        """
+        results: dict = {"success": [], "errors": []}
+        for inv_id in invoice_ids:
+            inv = self.store.get_invoice(inv_id)
+            if not inv:
+                results["errors"].append({"id": inv_id, "error": "Invoice not found."})
+                continue
+            try:
+                if inv.status in (InvoiceStatus.PAID, InvoiceStatus.CANCELLED):
+                    results["errors"].append({"id": inv_id, "error": f"Cannot cancel: status is '{inv.status.value}'."})
+                    continue
+                inv.status = InvoiceStatus.CANCELLED
+                inv.updated_at = datetime.now(tz=timezone.utc)
+                self.store.save_invoice(inv)
+                results["success"].append(inv_id)
+            except Exception as exc:
+                results["errors"].append({"id": inv_id, "error": str(exc)})
+        return results
+
+    def bulk_export(self, invoice_ids: list[str], format: str = "markdown") -> dict:
+        """Export multiple invoices to the specified format.
+
+        Returns: {"exports": [{"id": ..., "format": ..., "content": ...}], "errors": [...]}
+        """
+        results: dict = {"exports": [], "errors": []}
+        for inv_id in invoice_ids:
+            inv = self.store.get_invoice(inv_id)
+            if not inv:
+                results["errors"].append({"id": inv_id, "error": "Invoice not found."})
+                continue
+            try:
+                if format == "markdown":
+                    content = inv.to_markdown()
+                elif format == "json":
+                    content = inv.model_dump_json(indent=2)
+                else:
+                    results["errors"].append({"id": inv_id, "error": f"Unsupported format: {format}"})
+                    continue
+                results["exports"].append({"id": inv_id, "format": format, "content": content})
+            except Exception as exc:
+                results["errors"].append({"id": inv_id, "error": str(exc)})
+        return results

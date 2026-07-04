@@ -777,3 +777,117 @@ class Estimate(BaseModel):
             lines.append("")
             lines.append(f"**Converted to Invoice:** {self.converted_invoice_id}")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Expenses (v0.7.0)
+# ---------------------------------------------------------------------------
+
+class ExpenseCategory(str, Enum):
+    """Standard expense categories for agent businesses."""
+    SOFTWARE = "software"
+    API_COSTS = "api_costs"
+    INFRASTRUCTURE = "infrastructure"
+    CONTRACTORS = "contractors"
+    MARKETING = "marketing"
+    TRAVEL = "travel"
+    OFFICE = "office"
+    LEGAL = "legal"
+    INSURANCE = "insurance"
+    BANK_FEES = "bank_fees"
+    TAXES = "taxes"
+    OTHER = "other"
+
+
+class Expense(BaseModel):
+    """A business expense — cost incurred by the agent."""
+
+    id: str = Field(default_factory=lambda: f"EXP-{uuid.uuid4().hex[:6].upper()}")
+    description: str
+    amount: float
+    currency: str = "USD"
+    category: ExpenseCategory = ExpenseCategory.OTHER
+    vendor: Optional[str] = None  # Who the expense was paid to
+    invoice_id: Optional[str] = None  # Link to a supplier invoice (if any)
+    expense_date: date = Field(default_factory=date.today)
+    payment_method: Optional[str] = None  # e.g. "credit_card", "bank_transfer", "crypto"
+    reference: Optional[str] = None  # External reference number
+    notes: Optional[str] = None
+    tax_deductible: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Expense amount must be positive.")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Profit / Profitability Analysis (v0.7.0)
+# ---------------------------------------------------------------------------
+
+class ClientProfitability(BaseModel):
+    """Profitability analysis for a single client."""
+
+    client_id: str
+    client_name: Optional[str] = None
+    currency: str = "USD"
+    total_invoiced: float = 0.0
+    total_collected: float = 0.0
+    total_outstanding: float = 0.0
+    direct_costs: float = 0.0  # Expenses linked to this client (via invoice_id)
+    gross_revenue: float = 0.0  # total_collected
+    gross_profit: float = 0.0  # gross_revenue - direct_costs
+    gross_margin: float = 0.0  # gross_profit / gross_revenue * 100
+    invoice_count: int = 0
+    paid_invoice_count: int = 0
+    avg_invoice_value: float = 0.0
+
+
+class ProfitAnalysis(BaseModel):
+    """Overall profit analysis across all revenue and expenses."""
+
+    currency: str = "USD"
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    total_revenue: float = 0.0  # From collected invoice payments
+    total_expenses: float = 0.0  # All expenses
+    gross_profit: float = 0.0  # revenue - expenses
+    gross_margin: float = 0.0  # gross_profit / total_revenue * 100
+    expense_breakdown: list[dict] = []  # [{category, amount, percentage, count}]
+    client_profitability: list[ClientProfitability] = []
+
+
+# ---------------------------------------------------------------------------
+# Tax Summary Report (v0.7.0)
+# ---------------------------------------------------------------------------
+
+class TaxLineItemSummary(BaseModel):
+    """Tax summary for a single invoice's line items."""
+
+    invoice_id: str
+    client_name: Optional[str] = None
+    issue_date: date
+    subtotal: float = 0.0
+    tax_amount: float = 0.0
+    tax_rate: float = 0.0
+    currency: str = "USD"
+
+
+class TaxSummaryReport(BaseModel):
+    """Tax summary report for a given period — collected and owed taxes."""
+
+    period_start: date
+    period_end: date
+    currency: Optional[str] = None  # None = all currencies
+    total_invoiced: float = 0.0
+    total_tax_collected: float = 0.0
+    total_tax_from_paid: float = 0.0  # Tax from fully paid invoices only
+    effective_tax_rate: float = 0.0  # total_tax / total_invoiced * 100
+    tax_by_rate: list[dict] = []  # [{rate, count, tax_amount, subtotal}]
+    invoice_details: list[TaxLineItemSummary] = []
+    tax_deductible_expenses: float = 0.0  # Deductible expenses in the period
+    net_taxable_income: float = 0.0  # (total_invoiced - deductible expenses)

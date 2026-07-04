@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
+from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Expense, ExpenseCategory, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
@@ -25,6 +26,7 @@ class InvoiceStore:
         self.dunning_dir = self.data_dir / "dunning"
         self.credit_notes_dir = self.data_dir / "credit_notes"
         self.estimates_dir = self.data_dir / "estimates"
+        self.expenses_dir = self.data_dir / "expenses"
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -35,6 +37,7 @@ class InvoiceStore:
         self.dunning_dir.mkdir(parents=True, exist_ok=True)
         self.credit_notes_dir.mkdir(parents=True, exist_ok=True)
         self.estimates_dir.mkdir(parents=True, exist_ok=True)
+        self.expenses_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Numbering config ---
 
@@ -320,6 +323,57 @@ class InvoiceStore:
 
     def delete_estimate(self, estimate_id: str) -> bool:
         path = self.estimates_dir / f"{estimate_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Expense operations ---
+
+    def save_expense(self, expense: Expense) -> Expense:
+        path = self.expenses_dir / f"{expense.id}.json"
+        path.write_text(expense.model_dump_json(indent=2))
+        return expense
+
+    def get_expense(self, expense_id: str) -> Optional[Expense]:
+        path = self.expenses_dir / f"{expense_id}.json"
+        if not path.exists():
+            return None
+        return Expense.model_validate_json(path.read_text())
+
+    def list_expenses(
+        self,
+        category: Optional[ExpenseCategory | str] = None,
+        currency: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        vendor: Optional[str] = None,
+    ) -> list[Expense]:
+        """List expenses with optional filters."""
+        expenses = []
+        for path in sorted(self.expenses_dir.glob("*.json")):
+            exp = Expense.model_validate_json(path.read_text())
+            # Category filter
+            if category is not None:
+                cat_str = category.value if isinstance(category, ExpenseCategory) else str(category)
+                if exp.category.value != cat_str:
+                    continue
+            # Currency filter
+            if currency and exp.currency != currency.upper():
+                continue
+            # Date range filters
+            if date_from and exp.expense_date < date_from:
+                continue
+            if date_to and exp.expense_date > date_to:
+                continue
+            # Vendor filter (case-insensitive substring)
+            if vendor and (not exp.vendor or vendor.lower() not in exp.vendor.lower()):
+                continue
+            expenses.append(exp)
+        return expenses
+
+    def delete_expense(self, expense_id: str) -> bool:
+        path = self.expenses_dir / f"{expense_id}.json"
         if path.exists():
             path.unlink()
             return True

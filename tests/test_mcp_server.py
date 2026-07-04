@@ -43,9 +43,13 @@ def setup_client_and_invoice(svc, name="Test Corp", currency="USD"):
 
 
 class TestMCPToolCount:
-    def test_has_55_tools(self):
+    def test_has_expected_tools(self):
         tools = _run(list_tools())
-        assert len(tools) == 55
+        # v0.7.0 adds: expense_create, expense_list, expense_show, expense_update,
+        # expense_remove, expense_summary, profit_analysis, tax_report,
+        # bulk_mark_sent, bulk_mark_paid, bulk_cancel, bulk_export,
+        # export_estimate_pdf = 13 new tools
+        assert len(tools) == 68
 
     def test_all_tools_have_required_fields(self):
         tools = _run(list_tools())

@@ -132,7 +132,7 @@ class TestEstimatesAPI:
             "client": "Acme Corp",
             "line_items": [{"description": "Dev work", "quantity": 10, "unit_price": 100.0}],
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 201
         data = resp.json()
         assert data["id"].startswith("EST-")
         assert data["status"] == "draft"
@@ -146,7 +146,7 @@ class TestEstimatesAPI:
             "discount_amount": 50.0,
             "terms": "Net 30",
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 201
         data = resp.json()
         assert data["total"] == 170.0  # 200 + 20 tax - 50 discount
 
@@ -296,7 +296,7 @@ class TestEstimatesAPI:
             "line_items": [{"description": "Big project", "quantity": 20, "unit_price": 250.0}],
             "terms": "Net 30",
         })
-        assert create_resp.status_code == 200
+        assert create_resp.status_code == 201
         est_id = create_resp.json()["id"]
         assert create_resp.json()["total"] == 5000.0
 
