@@ -1,8 +1,52 @@
+<div align="center">
+
 # Agent Invoice
+
+**Invoicing, billing, and payment tracking for autonomous AI agents**
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests: 493](https://img.shields.io/badge/tests-493%20passing-brightgreen.svg)](#testing)
+[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
+[![Version: 0.7.0](https://img.shields.io/badge/version-0.7.0-blue.svg)](#changelog)
+
+</div>
+
+---
 
 **MCP server + CLI + REST API for autonomous agents to generate, track, and manage invoices.**
 
 Built for the agentic economy — by [Nyx Builds](https://github.com/nyx-builds).
+
+### MCP Server Setup
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "agent-invoice": {
+      "command": "uvx",
+      "args": ["agent-invoice", "serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "agent-invoice": {
+      "command": "uvx",
+      "args": ["agent-invoice", "serve"]
+    }
+  }
+}
+```
+
+**Any MCP host:** `command: uvx`, `args: ["agent-invoice", "serve"]`
 
 ## Why?
 
