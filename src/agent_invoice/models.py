@@ -891,3 +891,104 @@ class TaxSummaryReport(BaseModel):
     invoice_details: list[TaxLineItemSummary] = []
     tax_deductible_expenses: float = 0.0  # Deductible expenses in the period
     net_taxable_income: float = 0.0  # (total_invoiced - deductible expenses)
+
+
+# ---------------------------------------------------------------------------
+# Usage Metering & Agent Billing (v0.8.0)
+# ---------------------------------------------------------------------------
+
+class UsageEvent(BaseModel):
+    """A single usage event — one API call, one agent run, one token batch.
+
+    Records raw resource consumption so it can be metered, aggregated,
+    and billed to a client.
+    """
+
+    id: str = Field(default_factory=lambda: f"USE-{uuid.uuid4().hex[:8].upper()}")
+    client_id: Optional[str] = None  # Which client to bill for this usage
+    client_name: Optional[str] = None  # Denormalized client name for convenience
+    description: str  # Human-readable: "Claude Sonnet inference", "API gateway"
+    provider: str = "openai"  # openai, anthropic, google, custom, etc.
+    model: Optional[str] = None  # gpt-4, claude-3-opus, etc.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    request_count: int = 1  # Number of requests in this event
+    cost: float  # Dollar cost of this usage event
+    currency: str = "USD"
+    metadata: dict = {}  # Arbitrary key-value tags (project, task, agent_id)
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    billed: bool = False  # Has this been included in an invoice?
+    invoice_id: Optional[str] = None  # Invoice this was billed on
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+
+
+class UsageRecord(BaseModel):
+    """An aggregated usage record — bundles multiple events for billing.
+
+    Created when you want to invoice a client for accumulated usage.
+    Can be converted into invoice line items.
+    """
+
+    id: str = Field(default_factory=lambda: f"USG-{uuid.uuid4().hex[:8].upper()}")
+    client_id: str
+    client_name: Optional[str] = None
+    period_start: date = Field(default_factory=date.today)
+    period_end: date = Field(default_factory=date.today)
+    currency: str = "USD"
+
+    # Aggregated totals
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
+    total_cost: float = 0.0
+    event_count: int = 0
+
+    # Per-provider breakdown
+    provider_breakdown: list[dict] = []  # [{provider, model, requests, input, output, cost}]
+    # Per-model breakdown
+    model_breakdown: list[dict] = []  # [{model, requests, input, output, cost}]
+
+    # Line items derived from usage (for invoicing)
+    line_items: list[dict] = []
+
+    # Status
+    billed: bool = False
+    invoice_id: Optional[str] = None  # Created invoice ID
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @property
+    def total_tokens(self) -> int:
+        return (self.total_input_tokens + self.total_output_tokens +
+                self.total_cache_read_tokens + self.total_cache_write_tokens)
+
+
+class UsageSummary(BaseModel):
+    """Summary of all usage across a period — for dashboards."""
+
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    currency: Optional[str] = None
+    client_id: Optional[str] = None
+
+    total_events: int = 0
+    total_cost: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    billed_cost: float = 0.0
+    unbilled_cost: float = 0.0
+    billed_events: int = 0
+    unbilled_events: int = 0
+
+    # Breakdowns
+    by_provider: list[dict] = []  # [{provider, events, cost, tokens}]
+    by_model: list[dict] = []  # [{model, events, cost, tokens}]
+    by_client: list[dict] = []  # [{client_id, client_name, events, cost}]
+    daily: list[dict] = []  # [{date, events, cost}]

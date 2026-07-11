@@ -37,6 +37,8 @@ from .models import (
     RevenueAnalytics,
     TaxLineItemSummary,
     TaxSummaryReport,
+    UsageEvent,
+    UsageSummary,
     format_amount,
 )
 from .store import InvoiceStore
@@ -2098,3 +2100,423 @@ class InvoiceService:
             except Exception as exc:
                 results["errors"].append({"id": inv_id, "error": str(exc)})
         return results
+
+    # -----------------------------------------------------------------------
+    # Usage Metering & Agent Billing (v0.8.0)
+    # -----------------------------------------------------------------------
+
+    def record_usage(
+        self,
+        description: str,
+        cost: float,
+        client_identifier: Optional[str] = None,
+        provider: str = "openai",
+        model: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        request_count: int = 1,
+        currency: str = "USD",
+        metadata: Optional[dict] = None,
+    ) -> UsageEvent:
+        """Record a usage event for metering and billing.
+
+        Captures API/agent resource consumption tied to a client so it can
+        be aggregated into usage records and billed via invoices.
+
+        Args:
+            description: Human-readable description of the usage.
+            cost: Dollar cost of this usage event.
+            client_identifier: Client ID or name to attribute this usage to.
+            provider: AI provider (openai, anthropic, google, custom, etc.).
+            model: Specific model used (e.g. gpt-4, claude-3-opus).
+            input_tokens: Input/prompt tokens consumed.
+            output_tokens: Output/completion tokens generated.
+            cache_read_tokens: Tokens read from cache.
+            cache_write_tokens: Tokens written to cache.
+            request_count: Number of API requests in this event.
+            currency: Currency code for the cost.
+            metadata: Arbitrary key-value tags (project, task, agent_id).
+
+        Returns:
+            The created UsageEvent.
+        """
+        if cost < 0:
+            raise ValueError("Usage cost cannot be negative.")
+
+        client_id = None
+        client_name = None
+        if client_identifier:
+            client = self.get_client(client_identifier)
+            if not client:
+                raise ValueError(f"Client '{client_identifier}' not found.")
+            client_id = client.id
+            client_name = client.name
+
+        event = UsageEvent(
+            client_id=client_id,
+            client_name=client_name,
+            description=description,
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            request_count=request_count,
+            cost=round(cost, 6),
+            currency=currency.upper(),
+            metadata=metadata or {},
+        )
+        return self.store.save_usage_event(event)
+
+    def get_usage_event(self, event_id: str) -> Optional[UsageEvent]:
+        """Get a usage event by ID."""
+        return self.store.get_usage_event(event_id)
+
+    def list_usage_events(
+        self,
+        client_identifier: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        billed: Optional[bool] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+    ) -> list[UsageEvent]:
+        """List usage events with optional filters."""
+        client_id = None
+        if client_identifier:
+            c = self.get_client(client_identifier)
+            if c:
+                client_id = c.id
+        return self.store.list_usage_events(
+            client_id=client_id,
+            provider=provider,
+            model=model,
+            billed=billed,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+    def remove_usage_event(self, event_id: str) -> bool:
+        """Delete a usage event. Cannot delete billed events."""
+        event = self.store.get_usage_event(event_id)
+        if not event:
+            return False
+        if event.billed:
+            raise ValueError(f"Cannot delete billed usage event '{event_id}'. Remove from invoice first.")
+        return self.store.delete_usage_event(event_id)
+
+    def get_usage_summary(
+        self,
+        client_identifier: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        currency: Optional[str] = None,
+    ) -> UsageSummary:
+        """Get aggregated usage summary across events with optional filters.
+
+        Provides totals, billed vs unbilled breakdowns, and per-provider,
+        per-model, per-client, and daily breakdowns.
+        """
+        client_id = None
+        if client_identifier:
+            c = self.get_client(client_identifier)
+            if c:
+                client_id = c.id
+
+        events = self.store.list_usage_events(
+            client_id=client_id,
+            provider=provider,
+            model=model,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        if currency:
+            events = [e for e in events if e.currency == currency.upper()]
+
+        total_cost = 0.0
+        total_input = 0
+        total_output = 0
+        billed_cost = 0.0
+        unbilled_cost = 0.0
+        billed_events = 0
+        unbilled_events = 0
+
+        provider_map: dict[str, dict] = {}
+        model_map: dict[str, dict] = {}
+        client_map: dict[str, dict] = {}
+        daily_map: dict[str, dict] = {}
+
+        for e in events:
+            total_cost += e.cost
+            total_input += e.input_tokens + e.cache_read_tokens + e.cache_write_tokens
+            total_output += e.output_tokens
+
+            if e.billed:
+                billed_cost += e.cost
+                billed_events += 1
+            else:
+                unbilled_cost += e.cost
+                unbilled_events += 1
+
+            # By provider
+            p = e.provider
+            if p not in provider_map:
+                provider_map[p] = {"provider": p, "events": 0, "cost": 0.0, "tokens": 0}
+            provider_map[p]["events"] += 1
+            provider_map[p]["cost"] = round(provider_map[p]["cost"] + e.cost, 6)
+            provider_map[p]["tokens"] += e.total_tokens
+
+            # By model
+            m = e.model or "unknown"
+            if m not in model_map:
+                model_map[m] = {"model": m, "events": 0, "cost": 0.0, "tokens": 0}
+            model_map[m]["events"] += 1
+            model_map[m]["cost"] = round(model_map[m]["cost"] + e.cost, 6)
+            model_map[m]["tokens"] += e.total_tokens
+
+            # By client
+            cid = e.client_id or "unattributed"
+            cname = e.client_name or "Unattributed"
+            if cid not in client_map:
+                client_map[cid] = {"client_id": cid, "client_name": cname, "events": 0, "cost": 0.0}
+            client_map[cid]["events"] += 1
+            client_map[cid]["cost"] = round(client_map[cid]["cost"] + e.cost, 6)
+
+            # Daily
+            day_key = e.recorded_at.strftime("%Y-%m-%d")
+            if day_key not in daily_map:
+                daily_map[day_key] = {"date": day_key, "events": 0, "cost": 0.0}
+            daily_map[day_key]["events"] += 1
+            daily_map[day_key]["cost"] = round(daily_map[day_key]["cost"] + e.cost, 6)
+
+        return UsageSummary(
+            period_start=date_from,
+            period_end=date_to,
+            currency=currency.upper() if currency else None,
+            client_id=client_id,
+            total_events=len(events),
+            total_cost=round(total_cost, 6),
+            total_input_tokens=total_input,
+            total_output_tokens=total_output,
+            total_tokens=total_input + total_output,
+            billed_cost=round(billed_cost, 6),
+            unbilled_cost=round(unbilled_cost, 6),
+            billed_events=billed_events,
+            unbilled_events=unbilled_events,
+            by_provider=sorted(provider_map.values(), key=lambda x: -x["cost"]),
+            by_model=sorted(model_map.values(), key=lambda x: -x["cost"]),
+            by_client=sorted(client_map.values(), key=lambda x: -x["cost"]),
+            daily=sorted(daily_map.values(), key=lambda x: x["date"]),
+        )
+
+    def aggregate_usage_to_record(
+        self,
+        client_identifier: str,
+        period_start: date,
+        period_end: date,
+        currency: str = "USD",
+        include_billed: bool = False,
+    ) -> dict:
+        """Aggregate unbilled usage events for a client into a usage record.
+
+        Collects all usage events for the specified client within the date
+        range, groups them by provider and model, and returns a structured
+        record that can be turned into invoice line items.
+
+        Args:
+            client_identifier: Client ID or name.
+            period_start: Start of usage period.
+            period_end: End of usage period.
+            currency: Filter by currency.
+            include_billed: Include already-billed events (default: only unbilled).
+
+        Returns:
+            Dict with aggregated usage data and derived line items.
+        """
+        client = self.get_client(client_identifier)
+        if not client:
+            raise ValueError(f"Client '{client_identifier}' not found.")
+
+        billed_filter = None if include_billed else False
+        events = self.store.list_usage_events(
+            client_id=client.id,
+            billed=billed_filter,
+            date_from=period_start,
+            date_to=period_end,
+        )
+        events = [e for e in events if e.currency == currency.upper()]
+
+        if not events:
+            return {
+                "client_id": client.id,
+                "client_name": client.name,
+                "period_start": str(period_start),
+                "period_end": str(period_end),
+                "currency": currency.upper(),
+                "total_cost": 0.0,
+                "event_count": 0,
+                "line_items": [],
+                "event_ids": [],
+            }
+
+        # Aggregate by (provider, model)
+        agg: dict[tuple[str, str], dict] = {}
+        all_event_ids = []
+        for e in events:
+            key = (e.provider, e.model or "unknown")
+            if key not in agg:
+                agg[key] = {
+                    "provider": e.provider,
+                    "model": key[1],
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "request_count": 0,
+                    "cost": 0.0,
+                    "event_count": 0,
+                    "event_ids": [],
+                }
+            agg[key]["input_tokens"] += e.input_tokens
+            agg[key]["output_tokens"] += e.output_tokens
+            agg[key]["cache_read_tokens"] += e.cache_read_tokens
+            agg[key]["cache_write_tokens"] += e.cache_write_tokens
+            agg[key]["request_count"] += e.request_count
+            agg[key]["cost"] = round(agg[key]["cost"] + e.cost, 6)
+            agg[key]["event_count"] += 1
+            agg[key]["event_ids"].append(e.id)
+            all_event_ids.append(e.id)
+
+        # Build line items
+        line_items = []
+        for (provider, model), data in sorted(agg.items()):
+            description = f"AI Usage: {provider}/{model}"
+            if data["request_count"] > 1:
+                description += f" ({data['request_count']} requests)"
+            if data["input_tokens"] > 0 or data["output_tokens"] > 0:
+                total_toks = data["input_tokens"] + data["output_tokens"]
+                description += f" [{total_toks:,} tokens]"
+            line_items.append({
+                "description": description,
+                "quantity": 1,
+                "unit_price": round(data["cost"], 2),
+            })
+
+        # Provider breakdown
+        provider_breakdown = []
+        model_breakdown = []
+        for (provider, model), data in agg.items():
+            provider_breakdown.append({
+                "provider": provider,
+                "model": model,
+                "requests": data["request_count"],
+                "input_tokens": data["input_tokens"],
+                "output_tokens": data["output_tokens"],
+                "cost": round(data["cost"], 6),
+            })
+            model_breakdown.append({
+                "model": model,
+                "provider": provider,
+                "requests": data["request_count"],
+                "input_tokens": data["input_tokens"],
+                "output_tokens": data["output_tokens"],
+                "cost": round(data["cost"], 6),
+            })
+
+        total_cost = sum(d["cost"] for d in agg.values())
+
+        return {
+            "client_id": client.id,
+            "client_name": client.name,
+            "period_start": str(period_start),
+            "period_end": str(period_end),
+            "currency": currency.upper(),
+            "total_cost": round(total_cost, 2),
+            "event_count": len(events),
+            "line_items": line_items,
+            "provider_breakdown": sorted(provider_breakdown, key=lambda x: -x["cost"]),
+            "model_breakdown": sorted(model_breakdown, key=lambda x: -x["cost"]),
+            "event_ids": all_event_ids,
+        }
+
+    def create_invoice_from_usage(
+        self,
+        client_identifier: str,
+        period_start: date,
+        period_end: date,
+        currency: str = "USD",
+        due_days: int = 30,
+        markup_percent: float = 0.0,
+        notes: Optional[str] = None,
+    ) -> tuple[Invoice, dict]:
+        """Create an invoice from accumulated usage events for a client.
+
+        Aggregates all unbilled usage events within the period, creates an
+        invoice with line items per provider/model, and marks events as billed.
+
+        Args:
+            client_identifier: Client ID or name.
+            period_start: Start of usage period.
+            period_end: End of usage period.
+            currency: Currency for the invoice.
+            due_days: Days until invoice due date.
+            markup_percent: Optional markup percentage to add on top of cost
+                (e.g. 20.0 for 20% markup on usage cost).
+            notes: Additional notes on the invoice.
+
+        Returns:
+            Tuple of (created Invoice, usage record dict with details).
+        """
+        usage_record = self.aggregate_usage_to_record(
+            client_identifier=client_identifier,
+            period_start=period_start,
+            period_end=period_end,
+            currency=currency,
+            include_billed=False,
+        )
+
+        if usage_record["event_count"] == 0:
+            raise ValueError(
+                f"No unbilled usage events found for client '{client_identifier}' "
+                f"in period {period_start} to {period_end}."
+            )
+
+        # Apply markup if requested
+        line_items = usage_record["line_items"]
+        if markup_percent > 0:
+            multiplier = 1 + markup_percent / 100
+            for item in line_items:
+                item["unit_price"] = round(item["unit_price"] * multiplier, 2)
+
+        default_notes = (
+            f"Usage-based billing for period {period_start} to {period_end}. "
+            f"{usage_record['event_count']} events across "
+            f"{len(usage_record.get('provider_breakdown', []))} provider(s)."
+        )
+        if notes:
+            default_notes = notes + "\n\n" + default_notes
+
+        # Create the invoice
+        invoice = self.create_invoice(
+            client_identifier=client_identifier,
+            line_items=line_items,
+            due_days=due_days,
+            notes=default_notes,
+            currency=currency,
+        )
+
+        # Mark events as billed
+        for event_id in usage_record["event_ids"]:
+            event = self.store.get_usage_event(event_id)
+            if event:
+                event.billed = True
+                event.invoice_id = invoice.id
+                self.store.save_usage_event(event)
+
+        return invoice, usage_record

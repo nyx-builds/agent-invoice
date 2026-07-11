@@ -1273,6 +1273,104 @@ async def list_tools() -> list[Tool]:
                 "required": ["estimate_id"],
             },
         ),
+
+        # --- v0.8.0: Usage Metering & Agent Billing ---
+
+        Tool(
+            name="record_usage",
+            description="Record a usage event for AI/API consumption. Tracks tokens, cost, provider, and model for metering and client billing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Description of the usage (e.g. 'Claude inference', 'API gateway requests')"},
+                    "cost": {"type": "number", "description": "Dollar cost of this usage"},
+                    "client": {"type": "string", "description": "Client ID or name to attribute usage to (optional)"},
+                    "provider": {"type": "string", "description": "AI provider (openai, anthropic, google, custom)", "default": "openai"},
+                    "model": {"type": "string", "description": "Model used (e.g. gpt-4, claude-3-opus)"},
+                    "input_tokens": {"type": "integer", "description": "Input/prompt tokens", "default": 0},
+                    "output_tokens": {"type": "integer", "description": "Output/completion tokens", "default": 0},
+                    "cache_read_tokens": {"type": "integer", "description": "Cache read tokens", "default": 0},
+                    "cache_write_tokens": {"type": "integer", "description": "Cache write tokens", "default": 0},
+                    "request_count": {"type": "integer", "description": "Number of API requests", "default": 1},
+                    "currency": {"type": "string", "description": "Currency code (default: USD)"},
+                    "metadata": {"type": "object", "description": "Arbitrary key-value tags (project, task, agent_id)"},
+                },
+                "required": ["description", "cost"],
+            },
+        ),
+        Tool(
+            name="list_usage",
+            description="List usage events with optional filters by client, provider, model, billed status, and date range.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "provider": {"type": "string", "description": "Filter by provider"},
+                    "model": {"type": "string", "description": "Filter by model"},
+                    "billed": {"type": "boolean", "description": "Filter by billed status"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                },
+            },
+        ),
+        Tool(
+            name="get_usage_summary",
+            description="Get aggregated usage summary — totals, billed vs unbilled, breakdowns by provider/model/client/daily.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "provider": {"type": "string", "description": "Filter by provider"},
+                    "model": {"type": "string", "description": "Filter by model"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Filter by currency"},
+                },
+            },
+        ),
+        Tool(
+            name="aggregate_usage",
+            description="Aggregate unbilled usage events for a client into a structured record with line items ready for invoicing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Client ID or name"},
+                    "period_start": {"type": "string", "description": "Period start date (YYYY-MM-DD)"},
+                    "period_end": {"type": "string", "description": "Period end date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Currency code (default: USD)"},
+                    "include_billed": {"type": "boolean", "description": "Include already-billed events (default: false)"},
+                },
+                "required": ["client", "period_start", "period_end"],
+            },
+        ),
+        Tool(
+            name="invoice_from_usage",
+            description="Create an invoice from accumulated usage events for a client. Aggregates unbilled usage, creates invoice with line items per provider/model, and marks events as billed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Client ID or name"},
+                    "period_start": {"type": "string", "description": "Usage period start (YYYY-MM-DD)"},
+                    "period_end": {"type": "string", "description": "Usage period end (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Currency code (default: USD)"},
+                    "due_days": {"type": "integer", "description": "Days until due (default: 30)"},
+                    "markup_percent": {"type": "number", "description": "Markup percentage on usage cost (e.g. 20 for 20% markup)"},
+                    "notes": {"type": "string", "description": "Additional notes on the invoice"},
+                },
+                "required": ["client", "period_start", "period_end"],
+            },
+        ),
+        Tool(
+            name="remove_usage_event",
+            description="Delete a usage event. Cannot delete events that have already been billed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "The usage event ID"},
+                },
+                "required": ["event_id"],
+            },
+        ),
     ]
 
 
@@ -2215,6 +2313,142 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             company_email=arguments.get("company_email"),
         )
         return _json_result({"estimate_id": arguments["estimate_id"], "pdf_path": path})
+
+    # --- v0.8.0: Usage Metering & Agent Billing ---
+
+    elif name == "record_usage":
+        try:
+            event = svc.record_usage(
+                description=arguments["description"],
+                cost=arguments["cost"],
+                client_identifier=arguments.get("client"),
+                provider=arguments.get("provider", "openai"),
+                model=arguments.get("model"),
+                input_tokens=arguments.get("input_tokens", 0),
+                output_tokens=arguments.get("output_tokens", 0),
+                cache_read_tokens=arguments.get("cache_read_tokens", 0),
+                cache_write_tokens=arguments.get("cache_write_tokens", 0),
+                request_count=arguments.get("request_count", 1),
+                currency=arguments.get("currency", "USD"),
+                metadata=arguments.get("metadata", {}),
+            )
+            return _json_result({
+                "id": event.id,
+                "client": event.client_name or event.client_id,
+                "description": event.description,
+                "provider": event.provider,
+                "model": event.model,
+                "input_tokens": event.input_tokens,
+                "output_tokens": event.output_tokens,
+                "total_tokens": event.total_tokens,
+                "cost": event.cost,
+                "currency": event.currency,
+                "billed": event.billed,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_usage":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        events = svc.list_usage_events(
+            client_identifier=arguments.get("client"),
+            provider=arguments.get("provider"),
+            model=arguments.get("model"),
+            billed=arguments.get("billed"),
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return _json_result([
+            {
+                "id": e.id,
+                "client": e.client_name or e.client_id,
+                "description": e.description,
+                "provider": e.provider,
+                "model": e.model,
+                "input_tokens": e.input_tokens,
+                "output_tokens": e.output_tokens,
+                "total_tokens": e.total_tokens,
+                "cost": e.cost,
+                "currency": e.currency,
+                "billed": e.billed,
+                "invoice_id": e.invoice_id,
+                "recorded_at": str(e.recorded_at),
+            }
+            for e in events
+        ])
+
+    elif name == "get_usage_summary":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        summary = svc.get_usage_summary(
+            client_identifier=arguments.get("client"),
+            provider=arguments.get("provider"),
+            model=arguments.get("model"),
+            date_from=date_from,
+            date_to=date_to,
+            currency=arguments.get("currency"),
+        )
+        return _json_result(summary.model_dump(mode="json"))
+
+    elif name == "aggregate_usage":
+        from datetime import date as date_type
+        try:
+            period_start = date_type.fromisoformat(arguments["period_start"])
+            period_end = date_type.fromisoformat(arguments["period_end"])
+        except ValueError:
+            return _text_result("Error: Invalid date format. Use YYYY-MM-DD.")
+        try:
+            record = svc.aggregate_usage_to_record(
+                client_identifier=arguments["client"],
+                period_start=period_start,
+                period_end=period_end,
+                currency=arguments.get("currency", "USD"),
+                include_billed=arguments.get("include_billed", False),
+            )
+            return _json_result(record)
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "invoice_from_usage":
+        from datetime import date as date_type
+        try:
+            period_start = date_type.fromisoformat(arguments["period_start"])
+            period_end = date_type.fromisoformat(arguments["period_end"])
+        except ValueError:
+            return _text_result("Error: Invalid date format. Use YYYY-MM-DD.")
+        try:
+            invoice, record = svc.create_invoice_from_usage(
+                client_identifier=arguments["client"],
+                period_start=period_start,
+                period_end=period_end,
+                currency=arguments.get("currency", "USD"),
+                due_days=arguments.get("due_days", 30),
+                markup_percent=arguments.get("markup_percent", 0.0),
+                notes=arguments.get("notes"),
+            )
+            return _json_result({
+                "invoice_id": invoice.id,
+                "client": invoice.client_name,
+                "total": invoice.total,
+                "currency": invoice.currency,
+                "line_item_count": len(invoice.line_items),
+                "usage_events_billed": record["event_count"],
+                "usage_cost": record["total_cost"],
+                "due_date": str(invoice.due_date) if invoice.due_date else None,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_usage_event":
+        try:
+            if svc.remove_usage_event(arguments["event_id"]):
+                return _json_result({"removed": True, "event_id": arguments["event_id"]})
+            return _text_result(f"Usage event not found: {arguments['event_id']}")
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
 
     return _text_result(f"Unknown tool: {name}")
 

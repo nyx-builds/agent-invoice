@@ -83,7 +83,9 @@ Agents do work. Agents need to get paid. But there's no standard way for an auto
 - 📊 **Payment Tracking** — Monitor which invoices are pending, paid, partially paid, or overdue
 - 📒 **Earnings Ledger** — Running total of all income, tax, and discounts across invoices
 - 📤 **Export** — Export invoices as PDF, JSON, or Markdown
-- 🔌 **MCP Server** — 55 tools for full billing integration via Model Context Protocol
+- 🤖 **Usage Metering** (v0.8.0) — Track AI/API consumption (tokens, cost, provider, model) and bill clients based on actual usage
+- 💸 **Usage-Based Billing** (v0.8.0) — Aggregate usage events into invoices with per-provider/model line items and optional markup
+- 🔌 **MCP Server** — 74 tools for full billing integration via Model Context Protocol
 - 🌐 **REST API** — Full HTTP API with FastAPI for web integration
 - 💻 **CLI** — Command-line interface with 40+ commands for direct use or scripting
 - 💾 **JSON Storage** — Simple file-based storage, no database required

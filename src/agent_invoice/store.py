@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Expense, ExpenseCategory, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice
+from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Expense, ExpenseCategory, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice, UsageEvent
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
@@ -374,6 +374,62 @@ class InvoiceStore:
 
     def delete_expense(self, expense_id: str) -> bool:
         path = self.expenses_dir / f"{expense_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Usage event operations (v0.8.0) ---
+
+    def _ensure_usage_dir(self) -> None:
+        self.usage_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def usage_dir(self) -> Path:
+        return self.data_dir / "usage_events"
+
+    def save_usage_event(self, event: UsageEvent) -> UsageEvent:
+        self.usage_dir.mkdir(parents=True, exist_ok=True)
+        path = self.usage_dir / f"{event.id}.json"
+        path.write_text(event.model_dump_json(indent=2))
+        return event
+
+    def get_usage_event(self, event_id: str) -> Optional[UsageEvent]:
+        path = self.usage_dir / f"{event_id}.json"
+        if not path.exists():
+            return None
+        return UsageEvent.model_validate_json(path.read_text())
+
+    def list_usage_events(
+        self,
+        client_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        billed: Optional[bool] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+    ) -> list[UsageEvent]:
+        events = []
+        for path in sorted(self.usage_dir.glob("*.json")):
+            event = UsageEvent.model_validate_json(path.read_text())
+            if client_id and event.client_id != client_id:
+                continue
+            if provider and event.provider != provider:
+                continue
+            if model and event.model != model:
+                continue
+            if billed is not None and event.billed != billed:
+                continue
+            event_date = event.recorded_at.date()
+            if date_from and event_date < date_from:
+                continue
+            if date_to and event_date > date_to:
+                continue
+            events.append(event)
+        return events
+
+    def delete_usage_event(self, event_id: str) -> bool:
+        path = self.usage_dir / f"{event_id}.json"
         if path.exists():
             path.unlink()
             return True

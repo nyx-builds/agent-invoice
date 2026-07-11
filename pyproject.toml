@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-invoice"
-version = "0.7.0"
+version = "0.8.0"
 description = "MCP server + CLI + REST API for autonomous agents to generate, track, and manage invoices"
 readme = "README.md"
 license = "MIT"
