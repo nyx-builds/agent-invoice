@@ -992,3 +992,98 @@ class UsageSummary(BaseModel):
     by_model: list[dict] = []  # [{model, events, cost, tokens}]
     by_client: list[dict] = []  # [{client_id, client_name, events, cost}]
     daily: list[dict] = []  # [{date, events, cost}]
+
+
+# ---------------------------------------------------------------------------
+# Usage Analytics & Cost Intelligence (v0.9.0)
+# ---------------------------------------------------------------------------
+
+class CostTrend(BaseModel):
+    """Cost trend over a time series — for dashboards and analysis."""
+    granularity: str = "daily"  # daily, weekly, monthly
+    currency: Optional[str] = None
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    data_points: list[dict] = []  # [{period, cost, events, tokens, input_tokens, output_tokens}]
+    total_cost: float = 0.0
+    total_events: int = 0
+    avg_cost_per_period: float = 0.0
+    min_cost: float = 0.0
+    max_cost: float = 0.0
+    trend_direction: str = "stable"  # increasing, decreasing, stable
+    trend_percent: float = 0.0  # % change from first to last period
+
+
+class CostProjection(BaseModel):
+    """Projected future cost based on historical patterns."""
+    currency: Optional[str] = None
+    historical_periods: int = 0
+    projection_periods: int = 0
+    granularity: str = "daily"
+    avg_daily_cost: float = 0.0
+    projected_cost: float = 0.0
+    projected_breakdown: list[dict] = []  # [{period, projected_cost, is_projection: true}]
+    confidence: str = "low"  # low, medium, high based on data volume
+    methodology: str = ""  # Description of projection method
+
+
+class CostAnomaly(BaseModel):
+    """Detected cost anomaly — spending spike or outlier."""
+    period: str  # date or period label
+    expected_cost: float = 0.0
+    actual_cost: float = 0.0
+    deviation_percent: float = 0.0
+    severity: str = "info"  # info, warning, critical
+    event_count: int = 0
+    top_provider: Optional[str] = None
+    top_client: Optional[str] = None
+
+
+class AnomalyReport(BaseModel):
+    """Report of all detected cost anomalies in a period."""
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    currency: Optional[str] = None
+    baseline_avg_cost: float = 0.0
+    anomaly_threshold_percent: float = 50.0  # Configurable threshold
+    anomalies: list[CostAnomaly] = []
+    total_anomalies: int = 0
+
+
+class ModelEfficiency(BaseModel):
+    """Efficiency metrics for a specific model."""
+    provider: str
+    model: str
+    event_count: int = 0
+    total_cost: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    total_requests: int = 0
+    cost_per_1k_tokens: float = 0.0
+    cost_per_request: float = 0.0
+    avg_tokens_per_event: float = 0.0
+    output_ratio: float = 0.0  # output_tokens / total_tokens
+    cache_hit_ratio: float = 0.0  # cache_read / (input + cache_read)
+
+
+class EfficiencyReport(BaseModel):
+    """Comparative efficiency report across all models/providers."""
+    currency: Optional[str] = None
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    models: list[ModelEfficiency] = []
+    cheapest_per_1k_tokens: Optional[dict] = None  # {provider, model, cost_per_1k}
+    cheapest_per_request: Optional[dict] = None
+    most_efficient_output: Optional[dict] = None  # Highest output ratio
+    best_cache_utilization: Optional[dict] = None
+
+
+class ProviderComparison(BaseModel):
+    """Side-by-side comparison of providers."""
+    currency: Optional[str] = None
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    providers: list[dict] = []  # [{provider, total_cost, events, tokens, avg_cost, share_percent, models}]
+    total_cost: float = 0.0
+    dominant_provider: Optional[str] = None

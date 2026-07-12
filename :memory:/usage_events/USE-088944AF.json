@@ -1,0 +1,19 @@
+{
+  "id": "USE-088944AF",
+  "client_id": "CLT-0E96C772",
+  "client_name": "Test Inc",
+  "description": "day 1",
+  "provider": "openai",
+  "model": "gpt-4",
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "request_count": 1,
+  "cost": 0.08,
+  "currency": "USD",
+  "metadata": {},
+  "recorded_at": "2026-07-09T00:00:00Z",
+  "billed": false,
+  "invoice_id": null
+}

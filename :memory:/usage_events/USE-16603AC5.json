@@ -1,0 +1,19 @@
+{
+  "id": "USE-16603AC5",
+  "client_id": "CLT-CDAFFD98",
+  "client_name": "Severity Test",
+  "description": "day 2",
+  "provider": "openai",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "request_count": 1,
+  "cost": 0.01,
+  "currency": "USD",
+  "metadata": {},
+  "recorded_at": "2026-07-10T00:00:00Z",
+  "billed": false,
+  "invoice_id": null
+}

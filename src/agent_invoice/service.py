@@ -14,12 +14,16 @@ from .models import (
     ClientARAging,
     ClientProfitability,
     ClientStatement,
+    CostAnomaly,
+    CostProjection,
+    CostTrend,
     CreditNote,
     CreditNoteStatus,
     DunningAction,
     DunningConfig,
     DunningLevel,
     EarningsSummary,
+    EfficiencyReport,
     Estimate,
     EstimateStatus,
     Expense,
@@ -28,10 +32,13 @@ from .models import (
     InvoiceStatus,
     InvoiceTemplate,
     LineItem,
+    ModelEfficiency,
     MonthlyRevenue,
     NumberingConfig,
     Payment,
+    ProviderComparison,
     ProfitAnalysis,
+    AnomalyReport,
     RecurrenceFrequency,
     RecurringInvoice,
     RevenueAnalytics,
@@ -2520,3 +2527,493 @@ class InvoiceService:
                 self.store.save_usage_event(event)
 
         return invoice, usage_record
+
+    # -----------------------------------------------------------------------
+    # v0.9.0: Usage Analytics & Cost Intelligence
+    # -----------------------------------------------------------------------
+
+    def _filter_usage_events(
+        self,
+        client_identifier: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        currency: Optional[str] = None,
+    ) -> list[UsageEvent]:
+        """Get filtered usage events (shared helper)."""
+        client_id = None
+        if client_identifier:
+            c = self.get_client(client_identifier)
+            if c:
+                client_id = c.id
+        events = self.store.list_usage_events(
+            client_id=client_id,
+            provider=provider,
+            model=model,
+            billed=None,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if currency:
+            events = [e for e in events if e.currency == currency.upper()]
+        return events
+
+    def get_cost_trend(
+        self,
+        client_identifier: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        currency: Optional[str] = None,
+        granularity: str = "daily",
+    ) -> CostTrend:
+        """Get cost trend over time — daily, weekly, or monthly breakdown.
+
+        Returns a time series of cost/events/tokens, plus trend direction
+        and percentage change from first to last period.
+        """
+        events = self._filter_usage_events(
+            client_identifier=client_identifier,
+            provider=provider,
+            model=model,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+        )
+
+        if not events:
+            return CostTrend(
+                granularity=granularity,
+                currency=currency,
+                period_start=date_from,
+                period_end=date_to,
+                data_points=[],
+            )
+
+        def _period_key(d: date) -> str:
+            if granularity == "weekly":
+                iso = d.isocalendar()
+                return f"{iso[0]}-W{iso[1]:02d}"
+            elif granularity == "monthly":
+                return f"{d.year}-{d.month:02d}"
+            else:
+                return d.isoformat()
+
+        buckets: dict[str, dict] = {}
+        for e in events:
+            key = _period_key(e.recorded_at.date() if isinstance(e.recorded_at, datetime) else e.recorded_at)
+            if key not in buckets:
+                buckets[key] = {
+                    "period": key,
+                    "cost": 0.0,
+                    "events": 0,
+                    "tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                }
+            buckets[key]["cost"] = round(buckets[key]["cost"] + e.cost, 6)
+            buckets[key]["events"] += 1
+            buckets[key]["tokens"] += e.total_tokens
+            buckets[key]["input_tokens"] += e.input_tokens
+            buckets[key]["output_tokens"] += e.output_tokens
+
+        sorted_keys = sorted(buckets.keys())
+        data_points = [buckets[k] for k in sorted_keys]
+        costs = [dp["cost"] for dp in data_points]
+
+        total_cost = round(sum(costs), 6)
+        avg_cost = round(total_cost / len(data_points), 6) if data_points else 0.0
+
+        # Determine trend direction
+        trend_direction = "stable"
+        trend_percent = 0.0
+        if len(costs) >= 2 and costs[0] > 0:
+            change = ((costs[-1] - costs[0]) / costs[0]) * 100
+            trend_percent = round(change, 1)
+            if change > 10:
+                trend_direction = "increasing"
+            elif change < -10:
+                trend_direction = "decreasing"
+
+        return CostTrend(
+            granularity=granularity,
+            currency=currency,
+            period_start=date_from,
+            period_end=date_to,
+            data_points=data_points,
+            total_cost=total_cost,
+            total_events=sum(dp["events"] for dp in data_points),
+            avg_cost_per_period=avg_cost,
+            min_cost=round(min(costs), 6) if costs else 0.0,
+            max_cost=round(max(costs), 6) if costs else 0.0,
+            trend_direction=trend_direction,
+            trend_percent=trend_percent,
+        )
+
+    def get_cost_projection(
+        self,
+        projection_days: int = 30,
+        client_identifier: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        currency: Optional[str] = None,
+        lookback_days: int = 30,
+    ) -> CostProjection:
+        """Project future cost based on historical spending patterns.
+
+        Uses moving average of daily costs over the lookback period to
+        project forward. Confidence is based on data volume.
+        """
+        date_to = date.today()
+        date_from = date_to - timedelta(days=lookback_days)
+
+        events = self._filter_usage_events(
+            client_identifier=client_identifier,
+            provider=provider,
+            model=model,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+        )
+
+        if not events:
+            return CostProjection(
+                currency=currency,
+                projected_cost=0.0,
+                methodology="No historical data in lookback period.",
+            )
+
+        # Calculate daily averages
+        daily_costs: dict[str, float] = {}
+        for e in events:
+            d = e.recorded_at.date() if isinstance(e.recorded_at, datetime) else e.recorded_at
+            key = d.isoformat()
+            daily_costs[key] = round(daily_costs.get(key, 0.0) + e.cost, 6)
+
+        # How many days actually had data
+        days_with_data = len(daily_costs)
+        total_historical = round(sum(daily_costs.values()), 6)
+
+        # Average daily cost across all lookback days
+        actual_days = max(1, (date_to - date_from).days + 1)
+        avg_daily = round(total_historical / actual_days, 6)
+
+        projected_total = round(avg_daily * projection_days, 6)
+
+        # Confidence level
+        if days_with_data >= 14:
+            confidence = "high"
+        elif days_with_data >= 7:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        # Build projected breakdown
+        projected_breakdown = []
+        for i in range(projection_days):
+            future_date = date_to + timedelta(days=i + 1)
+            projected_breakdown.append({
+                "period": future_date.isoformat(),
+                "projected_cost": avg_daily,
+                "is_projection": True,
+            })
+
+        methodology = (
+            f"Moving average of {total_historical:.4f} cost over {days_with_data} active days "
+            f"in {lookback_days}-day lookback period. Average daily cost: {avg_daily:.4f}. "
+            f"Projected {projection_days} days forward."
+        )
+
+        return CostProjection(
+            currency=currency,
+            historical_periods=days_with_data,
+            projection_periods=projection_days,
+            granularity="daily",
+            avg_daily_cost=avg_daily,
+            projected_cost=projected_total,
+            projected_breakdown=projected_breakdown,
+            confidence=confidence,
+            methodology=methodology,
+        )
+
+    def detect_cost_anomalies(
+        self,
+        client_identifier: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        currency: Optional[str] = None,
+        threshold_percent: float = 50.0,
+    ) -> AnomalyReport:
+        """Detect cost anomalies — days where spending deviates from baseline.
+
+        Computes a baseline average daily cost and flags any day where actual
+        cost exceeds baseline by threshold_percent (default 50%).
+        """
+        events = self._filter_usage_events(
+            client_identifier=client_identifier,
+            provider=provider,
+            model=model,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+        )
+
+        if not events:
+            return AnomalyReport(
+                period_start=date_from,
+                period_end=date_to,
+                currency=currency,
+                anomaly_threshold_percent=threshold_percent,
+                anomalies=[],
+                baseline_avg_cost=0.0,
+            )
+
+        # Group by day
+        daily: dict[str, dict] = {}
+        for e in events:
+            d = e.recorded_at.date() if isinstance(e.recorded_at, datetime) else e.recorded_at
+            key = d.isoformat()
+            if key not in daily:
+                daily[key] = {"cost": 0.0, "events": 0, "providers": {}, "clients": {}}
+            daily[key]["cost"] = round(daily[key]["cost"] + e.cost, 6)
+            daily[key]["events"] += 1
+            daily[key]["providers"][e.provider] = daily[key]["providers"].get(e.provider, 0.0) + e.cost
+            if e.client_name:
+                daily[key]["clients"][e.client_name] = daily[key]["clients"].get(e.client_name, 0.0) + e.cost
+
+        sorted_days = sorted(daily.keys())
+        costs = [daily[d]["cost"] for d in sorted_days]
+        baseline_avg = round(sum(costs) / len(costs), 6) if costs else 0.0
+
+        anomalies: list[CostAnomaly] = []
+        for day in sorted_days:
+            actual = daily[day]["cost"]
+            if baseline_avg > 0:
+                deviation = ((actual - baseline_avg) / baseline_avg) * 100
+            else:
+                deviation = 0.0 if actual == 0 else 100.0
+
+            if deviation >= threshold_percent:
+                # Determine severity
+                if deviation >= 200:
+                    severity = "critical"
+                elif deviation >= 100:
+                    severity = "warning"
+                else:
+                    severity = "info"
+
+                # Top provider and client for this day
+                top_provider = max(daily[day]["providers"], key=daily[day]["providers"].get) if daily[day]["providers"] else None
+                top_client = max(daily[day]["clients"], key=daily[day]["clients"].get) if daily[day]["clients"] else None
+
+                anomalies.append(CostAnomaly(
+                    period=day,
+                    expected_cost=baseline_avg,
+                    actual_cost=round(actual, 6),
+                    deviation_percent=round(deviation, 1),
+                    severity=severity,
+                    event_count=daily[day]["events"],
+                    top_provider=top_provider,
+                    top_client=top_client,
+                ))
+
+        return AnomalyReport(
+            period_start=date_from,
+            period_end=date_to,
+            currency=currency,
+            baseline_avg_cost=baseline_avg,
+            anomaly_threshold_percent=threshold_percent,
+            anomalies=anomalies,
+            total_anomalies=len(anomalies),
+        )
+
+    def get_model_efficiency(
+        self,
+        client_identifier: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        currency: Optional[str] = None,
+    ) -> EfficiencyReport:
+        """Compare cost efficiency across all models/providers.
+
+        Metrics: cost per 1K tokens, cost per request, average tokens per
+        event, output ratio, cache hit ratio.
+        """
+        events = self._filter_usage_events(
+            client_identifier=client_identifier,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+        )
+
+        if not events:
+            return EfficiencyReport(
+                currency=currency,
+                period_start=date_from,
+                period_end=date_to,
+                models=[],
+            )
+
+        # Aggregate by (provider, model)
+        agg: dict[tuple[str, str], dict] = {}
+        for e in events:
+            key = (e.provider, e.model or "unknown")
+            if key not in agg:
+                agg[key] = {
+                    "provider": e.provider,
+                    "model": key[1],
+                    "cost": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "total_tokens": 0,
+                    "requests": 0,
+                    "events": 0,
+                }
+            agg[key]["cost"] = round(agg[key]["cost"] + e.cost, 6)
+            agg[key]["input_tokens"] += e.input_tokens
+            agg[key]["output_tokens"] += e.output_tokens
+            agg[key]["cache_read_tokens"] += e.cache_read_tokens
+            agg[key]["cache_write_tokens"] += e.cache_write_tokens
+            agg[key]["total_tokens"] += e.total_tokens
+            agg[key]["requests"] += e.request_count
+            agg[key]["events"] += 1
+
+        models: list[ModelEfficiency] = []
+        for (provider, model), d in sorted(agg.items(), key=lambda x: -x[1]["cost"]):
+            total_toks = d["total_tokens"]
+            cost_per_1k = round(d["cost"] / (total_toks / 1000), 6) if total_toks > 0 else 0.0
+            cost_per_req = round(d["cost"] / d["requests"], 6) if d["requests"] > 0 else 0.0
+            avg_toks = round(total_toks / d["events"], 1) if d["events"] > 0 else 0.0
+            output_ratio = round(d["output_tokens"] / total_toks, 4) if total_toks > 0 else 0.0
+            cache_hit = round(
+                d["cache_read_tokens"] / (d["input_tokens"] + d["cache_read_tokens"]), 4
+            ) if (d["input_tokens"] + d["cache_read_tokens"]) > 0 else 0.0
+
+            models.append(ModelEfficiency(
+                provider=d["provider"],
+                model=d["model"],
+                event_count=d["events"],
+                total_cost=round(d["cost"], 6),
+                total_input_tokens=d["input_tokens"],
+                total_output_tokens=d["output_tokens"],
+                total_tokens=total_toks,
+                total_requests=d["requests"],
+                cost_per_1k_tokens=cost_per_1k,
+                cost_per_request=cost_per_req,
+                avg_tokens_per_event=avg_toks,
+                output_ratio=output_ratio,
+                cache_hit_ratio=cache_hit,
+            ))
+
+        # Find best in each category
+        cheapest_1k = min(models, key=lambda m: m.cost_per_1k_tokens) if models else None
+        cheapest_req = min(models, key=lambda m: m.cost_per_request) if models else None
+        best_output = max(models, key=lambda m: m.output_ratio) if models else None
+        best_cache = max(models, key=lambda m: m.cache_hit_ratio) if models else None
+
+        return EfficiencyReport(
+            currency=currency,
+            period_start=date_from,
+            period_end=date_to,
+            models=models,
+            cheapest_per_1k_tokens={
+                "provider": cheapest_1k.provider,
+                "model": cheapest_1k.model,
+                "cost_per_1k": cheapest_1k.cost_per_1k_tokens,
+            } if cheapest_1k else None,
+            cheapest_per_request={
+                "provider": cheapest_req.provider,
+                "model": cheapest_req.model,
+                "cost_per_request": cheapest_req.cost_per_request,
+            } if cheapest_req else None,
+            most_efficient_output={
+                "provider": best_output.provider,
+                "model": best_output.model,
+                "output_ratio": best_output.output_ratio,
+            } if best_output else None,
+            best_cache_utilization={
+                "provider": best_cache.provider,
+                "model": best_cache.model,
+                "cache_hit_ratio": best_cache.cache_hit_ratio,
+            } if best_cache else None,
+        )
+
+    def compare_providers(
+        self,
+        client_identifier: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        currency: Optional[str] = None,
+    ) -> ProviderComparison:
+        """Side-by-side comparison of AI providers.
+
+        Shows total cost, event count, token volume, average cost per event,
+        market share, and model count for each provider.
+        """
+        events = self._filter_usage_events(
+            client_identifier=client_identifier,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+        )
+
+        if not events:
+            return ProviderComparison(
+                currency=currency,
+                period_start=date_from,
+                period_end=date_to,
+                providers=[],
+                total_cost=0.0,
+            )
+
+        # Aggregate by provider
+        prov_agg: dict[str, dict] = {}
+        for e in events:
+            p = e.provider
+            if p not in prov_agg:
+                prov_agg[p] = {
+                    "provider": p,
+                    "total_cost": 0.0,
+                    "events": 0,
+                    "tokens": 0,
+                    "models": set(),
+                }
+            prov_agg[p]["total_cost"] = round(prov_agg[p]["total_cost"] + e.cost, 6)
+            prov_agg[p]["events"] += 1
+            prov_agg[p]["tokens"] += e.total_tokens
+            if e.model:
+                prov_agg[p]["models"].add(e.model)
+
+        total_cost = round(sum(d["total_cost"] for d in prov_agg.values()), 6)
+
+        providers = []
+        for p, d in sorted(prov_agg.items(), key=lambda x: -x[1]["total_cost"]):
+            share = round(d["total_cost"] / total_cost * 100, 1) if total_cost > 0 else 0.0
+            avg_cost = round(d["total_cost"] / d["events"], 6) if d["events"] > 0 else 0.0
+            providers.append({
+                "provider": p,
+                "total_cost": d["total_cost"],
+                "events": d["events"],
+                "tokens": d["tokens"],
+                "avg_cost_per_event": avg_cost,
+                "share_percent": share,
+                "model_count": len(d["models"]),
+                "models": sorted(d["models"]),
+            })
+
+        dominant = providers[0]["provider"] if providers else None
+
+        return ProviderComparison(
+            currency=currency,
+            period_start=date_from,
+            period_end=date_to,
+            providers=providers,
+            total_cost=total_cost,
+            dominant_provider=dominant,
+        )

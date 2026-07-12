@@ -1,0 +1,19 @@
+{
+  "id": "USE-75FF02EE",
+  "client_id": "CLT-374D4B24",
+  "client_name": "Acme Corp",
+  "description": "GPT-4 inference day 0",
+  "provider": "openai",
+  "model": "gpt-4",
+  "input_tokens": 1000,
+  "output_tokens": 500,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "request_count": 1,
+  "cost": 0.05,
+  "currency": "USD",
+  "metadata": {},
+  "recorded_at": "2026-07-03T00:00:00Z",
+  "billed": false,
+  "invoice_id": null
+}

@@ -1371,6 +1371,82 @@ async def list_tools() -> list[Tool]:
                 "required": ["event_id"],
             },
         ),
+
+        # --- v0.9.0: Usage Analytics & Cost Intelligence ---
+
+        Tool(
+            name="get_cost_trend",
+            description="Get cost trend over time — daily, weekly, or monthly breakdown. Shows trend direction and percentage change.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "provider": {"type": "string", "description": "Filter by provider"},
+                    "model": {"type": "string", "description": "Filter by model"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Filter by currency"},
+                    "granularity": {"type": "string", "description": "Time bucket: daily, weekly, or monthly (default: daily)", "enum": ["daily", "weekly", "monthly"]},
+                },
+            },
+        ),
+        Tool(
+            name="get_cost_projection",
+            description="Project future spending based on historical usage patterns. Uses moving average with confidence scoring.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "projection_days": {"type": "integer", "description": "Number of days to project forward (default: 30)"},
+                    "lookback_days": {"type": "integer", "description": "Days of history to analyze (default: 30)"},
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "provider": {"type": "string", "description": "Filter by provider"},
+                    "model": {"type": "string", "description": "Filter by model"},
+                    "currency": {"type": "string", "description": "Filter by currency"},
+                },
+            },
+        ),
+        Tool(
+            name="detect_cost_anomalies",
+            description="Detect cost anomalies — days where spending deviates significantly from baseline average. Flags spikes and outliers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "provider": {"type": "string", "description": "Filter by provider"},
+                    "model": {"type": "string", "description": "Filter by model"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Filter by currency"},
+                    "threshold_percent": {"type": "number", "description": "Deviation threshold to flag as anomaly (default: 50, meaning 50% above baseline)"},
+                },
+            },
+        ),
+        Tool(
+            name="get_model_efficiency",
+            description="Compare cost efficiency across all AI models/providers. Metrics: cost per 1K tokens, cost per request, output ratio, cache hit ratio.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Filter by currency"},
+                },
+            },
+        ),
+        Tool(
+            name="compare_providers",
+            description="Side-by-side comparison of AI providers: total cost, events, tokens, market share, model count.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Filter by client ID or name"},
+                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+                    "currency": {"type": "string", "description": "Filter by currency"},
+                },
+            },
+        ),
     ]
 
 
@@ -2449,6 +2525,73 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return _text_result(f"Usage event not found: {arguments['event_id']}")
         except ValueError as e:
             return _text_result(f"Error: {e}")
+
+    # --- v0.9.0: Usage Analytics & Cost Intelligence ---
+
+    elif name == "get_cost_trend":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        trend = svc.get_cost_trend(
+            client_identifier=arguments.get("client"),
+            provider=arguments.get("provider"),
+            model=arguments.get("model"),
+            date_from=date_from,
+            date_to=date_to,
+            currency=arguments.get("currency"),
+            granularity=arguments.get("granularity", "daily"),
+        )
+        return _json_result(trend.model_dump(mode="json"))
+
+    elif name == "get_cost_projection":
+        projection = svc.get_cost_projection(
+            projection_days=arguments.get("projection_days", 30),
+            lookback_days=arguments.get("lookback_days", 30),
+            client_identifier=arguments.get("client"),
+            provider=arguments.get("provider"),
+            model=arguments.get("model"),
+            currency=arguments.get("currency"),
+        )
+        return _json_result(projection.model_dump(mode="json"))
+
+    elif name == "detect_cost_anomalies":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        report = svc.detect_cost_anomalies(
+            client_identifier=arguments.get("client"),
+            provider=arguments.get("provider"),
+            model=arguments.get("model"),
+            date_from=date_from,
+            date_to=date_to,
+            currency=arguments.get("currency"),
+            threshold_percent=arguments.get("threshold_percent", 50.0),
+        )
+        return _json_result(report.model_dump(mode="json"))
+
+    elif name == "get_model_efficiency":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        report = svc.get_model_efficiency(
+            client_identifier=arguments.get("client"),
+            date_from=date_from,
+            date_to=date_to,
+            currency=arguments.get("currency"),
+        )
+        return _json_result(report.model_dump(mode="json"))
+
+    elif name == "compare_providers":
+        from datetime import date as date_type
+        date_from = date_type.fromisoformat(arguments["date_from"]) if "date_from" in arguments else None
+        date_to = date_type.fromisoformat(arguments["date_to"]) if "date_to" in arguments else None
+        comparison = svc.compare_providers(
+            client_identifier=arguments.get("client"),
+            date_from=date_from,
+            date_to=date_to,
+            currency=arguments.get("currency"),
+        )
+        return _json_result(comparison.model_dump(mode="json"))
 
     return _text_result(f"Unknown tool: {name}")
 

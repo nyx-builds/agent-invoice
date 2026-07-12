@@ -49,7 +49,7 @@ class TestMCPToolCount:
         # expense_remove, expense_summary, profit_analysis, tax_report,
         # bulk_mark_sent, bulk_mark_paid, bulk_cancel, bulk_export,
         # export_estimate_pdf = 13 new tools
-        assert len(tools) == 74  # v0.8.0: +6 usage metering tools
+        assert len(tools) == 79  # v0.9.0: +5 analytics tools
 
     def test_all_tools_have_required_fields(self):
         tools = _run(list_tools())

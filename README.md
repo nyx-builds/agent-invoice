@@ -85,7 +85,8 @@ Agents do work. Agents need to get paid. But there's no standard way for an auto
 - 📤 **Export** — Export invoices as PDF, JSON, or Markdown
 - 🤖 **Usage Metering** (v0.8.0) — Track AI/API consumption (tokens, cost, provider, model) and bill clients based on actual usage
 - 💸 **Usage-Based Billing** (v0.8.0) — Aggregate usage events into invoices with per-provider/model line items and optional markup
-- 🔌 **MCP Server** — 74 tools for full billing integration via Model Context Protocol
+- 📊 **Cost Analytics** (v0.9.0) — Cost trends, projections, anomaly detection, model efficiency scoring, and provider comparison
+- 🔌 **MCP Server** — 79 tools for full billing integration via Model Context Protocol
 - 🌐 **REST API** — Full HTTP API with FastAPI for web integration
 - 💻 **CLI** — Command-line interface with 40+ commands for direct use or scripting
 - 💾 **JSON Storage** — Simple file-based storage, no database required

@@ -1,0 +1,19 @@
+{
+  "id": "USE-7E436196",
+  "client_id": "CLT-5D23B2BA",
+  "client_name": "Confidence Test",
+  "description": "day 1",
+  "provider": "openai",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "request_count": 1,
+  "cost": 0.05,
+  "currency": "USD",
+  "metadata": {},
+  "recorded_at": "2026-06-24T00:00:00Z",
+  "billed": false,
+  "invoice_id": null
+}
