@@ -30,3 +30,4 @@ Thumbs.db
 
 # Project
 *.egg
+:memory:/
