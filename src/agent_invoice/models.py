@@ -1087,3 +1087,467 @@ class ProviderComparison(BaseModel):
     providers: list[dict] = []  # [{provider, total_cost, events, tokens, avg_cost, share_percent, models}]
     total_cost: float = 0.0
     dominant_provider: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Rate Cards — Automatic Cost Calculation (v1.0.0)
+# ---------------------------------------------------------------------------
+
+class ModelPricing(BaseModel):
+    """Pricing for a single model — per-million-token rates.
+
+    All rates are in the parent RateCard's currency, per 1,000,000 tokens.
+    """
+
+    input_rate: float = 0.0      # $/M input tokens
+    output_rate: float = 0.0     # $/M output tokens
+    cache_read_rate: float = 0.0  # $/M cache-read tokens (often discounted)
+    cache_write_rate: float = 0.0  # $/M cache-write tokens
+    request_rate: float = 0.0    # $/request flat fee (per-call surcharge, $ not $/M)
+
+    def cost_for(
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        request_count: int = 1,
+    ) -> float:
+        """Calculate cost for given usage based on this pricing."""
+        token_cost = (
+            input_tokens * self.input_rate / 1_000_000
+            + output_tokens * self.output_rate / 1_000_000
+            + cache_read_tokens * self.cache_read_rate / 1_000_000
+            + cache_write_tokens * self.cache_write_rate / 1_000_000
+        )
+        request_cost = self.request_rate * request_count
+        return round(token_cost + request_cost, 6)
+
+
+class RateCard(BaseModel):
+    """A rate card mapping provider+model to per-token pricing.
+
+    Agents record usage with just tokens and provider/model — the rate card
+    calculates the cost automatically. No manual cost entry needed.
+    """
+
+    id: str = Field(default_factory=lambda: f"RATE-{uuid.uuid4().hex[:6].upper()}")
+    name: str  # Human-readable name: "Production 2026-Q3", "Enterprise"
+    currency: str = "USD"
+    active: bool = True
+    models: dict[str, ModelPricing] = {}  # key: "provider:model" e.g. "openai:gpt-4o"
+    description: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @staticmethod
+    def model_key(provider: str, model: str) -> str:
+        """Canonical key for a provider:model pair."""
+        return f"{provider.lower()}:{model.lower()}"
+
+    def get_pricing(self, provider: str, model: str) -> Optional[ModelPricing]:
+        """Look up pricing for a provider+model. Returns None if not found."""
+        return self.models.get(self.model_key(provider, model))
+
+    def set_pricing(self, provider: str, model: str, pricing: ModelPricing) -> None:
+        """Set or update pricing for a provider+model."""
+        self.models[self.model_key(provider, model)] = pricing
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def remove_pricing(self, provider: str, model: str) -> bool:
+        """Remove pricing for a provider+model. Returns True if found."""
+        key = self.model_key(provider, model)
+        if key in self.models:
+            del self.models[key]
+            self.updated_at = datetime.now(tz=timezone.utc)
+            return True
+        return False
+
+    def list_models(self) -> list[dict]:
+        """Return all model entries as a list of dicts."""
+        result = []
+        for key, pricing in sorted(self.models.items()):
+            provider, model = key.split(":", 1)
+            result.append({
+                "provider": provider,
+                "model": model,
+                "input_rate": pricing.input_rate,
+                "output_rate": pricing.output_rate,
+                "cache_read_rate": pricing.cache_read_rate,
+                "cache_write_rate": pricing.cache_write_rate,
+                "request_rate": pricing.request_rate,
+            })
+        return result
+
+    def calculate_cost(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        request_count: int = 1,
+    ) -> Optional[float]:
+        """Calculate cost for usage based on this rate card. None if no pricing."""
+        pricing = self.get_pricing(provider, model)
+        if pricing is None:
+            return None
+        return pricing.cost_for(
+            input_tokens, output_tokens,
+            cache_read_tokens, cache_write_tokens,
+            request_count,
+        )
+
+
+class BatchUsageResult(BaseModel):
+    """Result of a batch usage recording operation."""
+
+    total_recorded: int = 0
+    total_failed: int = 0
+    total_cost: float = 0.0
+    event_ids: list[str] = []
+    errors: list[dict] = []  # [{index, error}]
+    currency: str = "USD"
+
+
+# ---------------------------------------------------------------------------
+# Subscription Plans & MRR (v0.10.0)
+# ---------------------------------------------------------------------------
+
+class BillingCycle(str, Enum):
+    """Billing cycle for subscription plans."""
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+
+class SubscriptionStatus(str, Enum):
+    """Lifecycle status of a subscription."""
+    TRIALING = "trialing"
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class SubscriptionPlan(BaseModel):
+    """A reusable subscription product/plan.
+
+    Defines pricing, billing cycle, trial period, and optional usage quotas.
+    Clients subscribe to a plan to receive recurring invoices.
+    """
+
+    id: str = Field(default_factory=lambda: f"PLN-{uuid.uuid4().hex[:6].upper()}")
+    name: str
+    description: Optional[str] = None
+    price: float
+    currency: str = "USD"
+    billing_cycle: BillingCycle = BillingCycle.MONTHLY
+    trial_days: int = 0  # Free trial period; 0 = no trial
+    tax_rate: float = 0.0
+    due_days: int = 15  # Invoice due period after generation
+    active: bool = True  # Plans can be deprecated without deleting
+
+    # Usage quotas / limits (optional)
+    quota_requests: Optional[int] = None  # Max API requests per billing period
+    quota_tokens: Optional[int] = None  # Max tokens per billing period
+    overage_rate: Optional[float] = None  # $ per unit over quota
+
+    # Metadata
+    metadata: dict = {}
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @field_validator("price")
+    @classmethod
+    def price_must_be_non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("Plan price cannot be negative.")
+        return v
+
+    @property
+    def monthly_price(self) -> float:
+        """Normalized monthly price for MRR comparisons."""
+        cycle_days = {
+            BillingCycle.DAILY: 1,
+            BillingCycle.WEEKLY: 7,
+            BillingCycle.MONTHLY: 30,
+            BillingCycle.QUARTERLY: 90,
+            BillingCycle.YEARLY: 365,
+        }
+        days = cycle_days[self.billing_cycle]
+        return round(self.price * 30 / days, 2)
+
+    @property
+    def has_trial(self) -> bool:
+        return self.trial_days > 0
+
+    def cycle_delta(self) -> timedelta:
+        """timedelta for one billing cycle."""
+        return {
+            BillingCycle.DAILY: timedelta(days=1),
+            BillingCycle.WEEKLY: timedelta(weeks=1),
+            BillingCycle.MONTHLY: timedelta(days=30),
+            BillingCycle.QUARTERLY: timedelta(days=90),
+            BillingCycle.YEARLY: timedelta(days=365),
+        }[self.billing_cycle]
+
+    def generate_line_items(self) -> list[LineItem]:
+        """Generate invoice line items for one billing cycle."""
+        items = [LineItem(
+            description=f"{self.name} — {self.billing_cycle.value} subscription",
+            quantity=1,
+            unit_price=self.price,
+            tax_rate=self.tax_rate,
+        )]
+        return items
+
+
+class Subscription(BaseModel):
+    """A client's subscription to a plan.
+
+    Manages the full lifecycle: trial → active → past due / cancelled.
+    Generates invoices on each billing cycle.
+    """
+
+    id: str = Field(default_factory=lambda: f"SUB-{uuid.uuid4().hex[:8].upper()}")
+    client_id: str
+    client_name: Optional[str] = None
+    plan_id: str
+    plan_name: Optional[str] = None
+
+    # Billing details (copied from plan at subscription time)
+    price: float
+    currency: str = "USD"
+    billing_cycle: BillingCycle = BillingCycle.MONTHLY
+    tax_rate: float = 0.0
+    due_days: int = 15
+    trial_days: int = 0
+
+    # Lifecycle
+    status: SubscriptionStatus = SubscriptionStatus.TRIALING
+    start_date: date = Field(default_factory=date.today)
+    trial_end_date: Optional[date] = None
+    current_period_start: date = Field(default_factory=date.today)
+    current_period_end: date = Field(default_factory=date.today)
+    cancelled_at: Optional[date] = None
+    ended_at: Optional[date] = None
+
+    # Billing tracking
+    next_billing_date: Optional[date] = None
+    last_invoice_id: Optional[str] = None
+    invoice_ids: list[str] = []
+
+    # Metadata
+    metadata: dict = {}
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @field_validator("price")
+    @classmethod
+    def price_must_be_non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("Subscription price cannot be negative.")
+        return v
+
+    @property
+    def monthly_revenue(self) -> float:
+        """Normalized MRR contribution of this subscription."""
+        cycle_days = {
+            BillingCycle.DAILY: 1,
+            BillingCycle.WEEKLY: 7,
+            BillingCycle.MONTHLY: 30,
+            BillingCycle.QUARTERLY: 90,
+            BillingCycle.YEARLY: 365,
+        }
+        days = cycle_days[self.billing_cycle]
+        return round(self.price * 30 / days, 2)
+
+    @property
+    def is_in_trial(self) -> bool:
+        return self.status == SubscriptionStatus.TRIALING and self.trial_end_date is not None
+
+    @property
+    def trial_days_remaining(self) -> int:
+        """Days remaining in trial; 0 if not trialing or trial ended."""
+        if not self.is_in_trial:
+            return 0
+        remaining = (self.trial_end_date - date.today()).days
+        return max(0, remaining)
+
+    @property
+    def is_billable(self) -> bool:
+        """True if this subscription should be invoiced (active or past_due)."""
+        return self.status in (SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE)
+
+    def _cycle_delta(self) -> timedelta:
+        """timedelta for one billing cycle."""
+        return {
+            BillingCycle.DAILY: timedelta(days=1),
+            BillingCycle.WEEKLY: timedelta(weeks=1),
+            BillingCycle.MONTHLY: timedelta(days=30),
+            BillingCycle.QUARTERLY: timedelta(days=90),
+            BillingCycle.YEARLY: timedelta(days=365),
+        }[self.billing_cycle]
+
+    def init_trial(self) -> None:
+        """Initialize trial period if the plan has trial days."""
+        if self.trial_days > 0:
+            self.status = SubscriptionStatus.TRIALING
+            self.trial_end_date = self.start_date + timedelta(days=self.trial_days)
+            # First billing happens after trial ends
+            self.next_billing_date = self.trial_end_date
+            self.current_period_end = self.trial_end_date
+        else:
+            self.status = SubscriptionStatus.ACTIVE
+            self.current_period_start = self.start_date
+            self.current_period_end = self.start_date + self._cycle_delta()
+            self.next_billing_date = self.start_date
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def activate_from_trial(self) -> None:
+        """Convert from trialing to active when trial ends."""
+        self.status = SubscriptionStatus.ACTIVE
+        self.current_period_start = date.today()
+        self.current_period_end = date.today() + self._cycle_delta()
+        self.next_billing_date = date.today()
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def advance_period(self) -> None:
+        """Advance to the next billing period after an invoice is generated."""
+        self.current_period_start = self.current_period_end
+        self.current_period_end = self.current_period_end + self._cycle_delta()
+        self.next_billing_date = self.current_period_end
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def mark_past_due(self) -> None:
+        """Mark subscription as past due (invoice unpaid)."""
+        self.status = SubscriptionStatus.PAST_DUE
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def cancel(self, immediately: bool = False) -> None:
+        """Cancel the subscription.
+
+        Args:
+            immediately: If True, ends right now. If False, stays active until period end.
+        """
+        self.cancelled_at = date.today()
+        if immediately:
+            self.status = SubscriptionStatus.CANCELLED
+            self.ended_at = date.today()
+            self.next_billing_date = None
+        else:
+            self.status = SubscriptionStatus.ACTIVE  # still active until period ends
+            self.next_billing_date = None  # won't renew
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def pause(self) -> None:
+        """Pause the subscription (billing resumes on resume)."""
+        self.status = SubscriptionStatus.PAUSED
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def resume(self) -> None:
+        """Resume a paused subscription."""
+        if self.status != SubscriptionStatus.PAUSED:
+            raise ValueError("Only paused subscriptions can be resumed.")
+        self.status = SubscriptionStatus.ACTIVE
+        self.current_period_start = date.today()
+        self.current_period_end = date.today() + self._cycle_delta()
+        self.next_billing_date = date.today()
+        self.updated_at = datetime.now(tz=timezone.utc)
+
+    def generate_line_items(self) -> list[LineItem]:
+        """Generate invoice line items for this subscription's billing cycle."""
+        item = LineItem(
+            description=f"{self.plan_name or 'Subscription'} — {self.billing_cycle.value} subscription"
+                        + (f" (period: {self.current_period_start} to {self.current_period_end})"
+                           if self.current_period_start else ""),
+            quantity=1,
+            unit_price=self.price,
+            tax_rate=self.tax_rate,
+        )
+        return [item]
+
+
+class MRRSummary(BaseModel):
+    """Monthly Recurring Revenue summary dashboard."""
+    currency: str = "USD"
+    as_of_date: date = Field(default_factory=date.today)
+
+    # Active subscriptions
+    active_count: int = 0
+    trialing_count: int = 0
+    past_due_count: int = 0
+    paused_count: int = 0
+    cancelled_count: int = 0
+    total_count: int = 0
+
+    # Revenue metrics
+    mrr: float = 0.0  # Monthly Recurring Revenue (active + past_due only)
+    arr: float = 0.0  # Annual Recurring Revenue (MRR * 12)
+    trial_mrr: float = 0.0  # Potential MRR from trialing subscriptions
+    paused_mrr: float = 0.0  # MRR currently paused
+    lost_mrr: float = 0.0  # MRR from cancelled subs in this period
+
+    # By plan
+    by_plan: list[dict] = []  # [{plan_id, plan_name, count, mrr, monthly_price}]
+    # By billing cycle
+    by_cycle: list[dict] = []  # [{cycle, count, mrr}]
+    # By client
+    top_clients: list[dict] = []  # [{client_id, client_name, plan_name, mrr}]
+
+    # Churn metrics
+    avg_subscription_value: float = 0.0
+
+
+# Built-in subscription plans for agent services
+BUILTIN_PLANS: list[dict] = [
+    {
+        "id": "PLN-STARTER",
+        "name": "Starter Agent",
+        "description": "Basic agent API access with monthly quota",
+        "price": 49.0,
+        "currency": "USD",
+        "billing_cycle": "monthly",
+        "trial_days": 14,
+        "quota_requests": 10000,
+        "quota_tokens": 1_000_000,
+    },
+    {
+        "id": "PLN-PRO",
+        "name": "Professional Agent",
+        "description": "Higher quotas and priority routing",
+        "price": 199.0,
+        "currency": "USD",
+        "billing_cycle": "monthly",
+        "trial_days": 14,
+        "quota_requests": 100000,
+        "quota_tokens": 10_000_000,
+    },
+    {
+        "id": "PLN-ENTERPRISE",
+        "name": "Enterprise Agent",
+        "description": "Unlimited requests with dedicated support",
+        "price": 999.0,
+        "currency": "USD",
+        "billing_cycle": "monthly",
+        "trial_days": 0,
+        "quota_requests": None,
+        "quota_tokens": None,
+    },
+    {
+        "id": "PLN-YEARLY-PRO",
+        "name": "Annual Professional",
+        "description": "Annual billing with 2 months free",
+        "price": 1990.0,
+        "currency": "USD",
+        "billing_cycle": "yearly",
+        "trial_days": 14,
+        "quota_requests": 1200000,
+        "quota_tokens": 120_000_000,
+    },
+]

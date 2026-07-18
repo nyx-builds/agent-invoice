@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from .models import Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Expense, ExpenseCategory, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RecurringInvoice, UsageEvent
+from .models import BillingCycle, Client, CreditNote, CreditNoteStatus, DunningAction, DunningConfig, Estimate, Expense, ExpenseCategory, Invoice, InvoiceStatus, InvoiceTemplate, NumberingConfig, RateCard, RecurringInvoice, Subscription, SubscriptionPlan, SubscriptionStatus, UsageEvent
 
 
 DEFAULT_DATA_DIR = os.path.expanduser("~/.agent-invoice")
@@ -430,6 +430,126 @@ class InvoiceStore:
 
     def delete_usage_event(self, event_id: str) -> bool:
         path = self.usage_dir / f"{event_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Rate card operations (v1.0.0) ---
+
+    @property
+    def rate_cards_dir(self) -> Path:
+        return self.data_dir / "rate_cards"
+
+    def _ensure_rate_cards_dir(self) -> None:
+        self.rate_cards_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_rate_card(self, card: RateCard) -> RateCard:
+        self._ensure_rate_cards_dir()
+        path = self.rate_cards_dir / f"{card.id}.json"
+        path.write_text(card.model_dump_json(indent=2))
+        return card
+
+    def get_rate_card(self, card_id: str) -> Optional[RateCard]:
+        path = self.rate_cards_dir / f"{card_id}.json"
+        if not path.exists():
+            return None
+        return RateCard.model_validate_json(path.read_text())
+
+    def list_rate_cards(self, active_only: bool = False) -> list[RateCard]:
+        cards = []
+        for path in sorted(self.rate_cards_dir.glob("*.json")):
+            card = RateCard.model_validate_json(path.read_text())
+            if active_only and not card.active:
+                continue
+            cards.append(card)
+        return cards
+
+    def delete_rate_card(self, card_id: str) -> bool:
+        path = self.rate_cards_dir / f"{card_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Subscription plan operations (v0.10.0) ---
+
+    @property
+    def plans_dir(self) -> Path:
+        return self.data_dir / "subscription_plans"
+
+    def _ensure_plans_dir(self) -> None:
+        self.plans_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_plan(self, plan: SubscriptionPlan) -> SubscriptionPlan:
+        self._ensure_plans_dir()
+        path = self.plans_dir / f"{plan.id}.json"
+        path.write_text(plan.model_dump_json(indent=2))
+        return plan
+
+    def get_plan(self, plan_id: str) -> Optional[SubscriptionPlan]:
+        path = self.plans_dir / f"{plan_id}.json"
+        if not path.exists():
+            return None
+        return SubscriptionPlan.model_validate_json(path.read_text())
+
+    def list_plans(self, active_only: bool = False) -> list[SubscriptionPlan]:
+        plans = []
+        for path in sorted(self.plans_dir.glob("*.json")):
+            plan = SubscriptionPlan.model_validate_json(path.read_text())
+            if active_only and not plan.active:
+                continue
+            plans.append(plan)
+        return plans
+
+    def delete_plan(self, plan_id: str) -> bool:
+        path = self.plans_dir / f"{plan_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    # --- Subscription operations (v0.10.0) ---
+
+    @property
+    def subscriptions_dir(self) -> Path:
+        return self.data_dir / "subscriptions"
+
+    def _ensure_subscriptions_dir(self) -> None:
+        self.subscriptions_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_subscription(self, sub: Subscription) -> Subscription:
+        self._ensure_subscriptions_dir()
+        path = self.subscriptions_dir / f"{sub.id}.json"
+        path.write_text(sub.model_dump_json(indent=2))
+        return sub
+
+    def get_subscription(self, sub_id: str) -> Optional[Subscription]:
+        path = self.subscriptions_dir / f"{sub_id}.json"
+        if not path.exists():
+            return None
+        return Subscription.model_validate_json(path.read_text())
+
+    def list_subscriptions(
+        self,
+        client_id: Optional[str] = None,
+        plan_id: Optional[str] = None,
+        status: Optional[SubscriptionStatus] = None,
+    ) -> list[Subscription]:
+        subs = []
+        for path in sorted(self.subscriptions_dir.glob("*.json")):
+            sub = Subscription.model_validate_json(path.read_text())
+            if client_id and sub.client_id != client_id:
+                continue
+            if plan_id and sub.plan_id != plan_id:
+                continue
+            if status and sub.status != status:
+                continue
+            subs.append(sub)
+        return subs
+
+    def delete_subscription(self, sub_id: str) -> bool:
+        path = self.subscriptions_dir / f"{sub_id}.json"
         if path.exists():
             path.unlink()
             return True

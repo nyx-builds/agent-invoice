@@ -8,7 +8,9 @@ from typing import Optional
 from .models import (
     ARAgingBucket,
     ARAgingReport,
+    BUILTIN_PLANS,
     BUILTIN_TEMPLATES,
+    BillingCycle,
     CURRENCIES,
     Client,
     ClientARAging,
@@ -34,14 +36,21 @@ from .models import (
     LineItem,
     ModelEfficiency,
     MonthlyRevenue,
+    MRRSummary,
     NumberingConfig,
     Payment,
     ProviderComparison,
     ProfitAnalysis,
     AnomalyReport,
+    BatchUsageResult,
+    ModelPricing,
+    RateCard,
     RecurrenceFrequency,
     RecurringInvoice,
     RevenueAnalytics,
+    Subscription,
+    SubscriptionPlan,
+    SubscriptionStatus,
     TaxLineItemSummary,
     TaxSummaryReport,
     UsageEvent,
@@ -3016,4 +3025,688 @@ class InvoiceService:
             providers=providers,
             total_cost=total_cost,
             dominant_provider=dominant,
+        )
+
+    # ===================================================================
+    # v1.0.0 — Rate Cards: automatic per-token cost calculation
+    # ===================================================================
+
+    def create_rate_card(
+        self,
+        name: str,
+        currency: str = "USD",
+        description: Optional[str] = None,
+        models: Optional[list[dict]] = None,
+        active: bool = True,
+    ) -> RateCard:
+        """Create a rate card mapping provider+model to per-token pricing.
+
+        Args:
+            name: Human-readable name (e.g. "Production 2026-Q3").
+            currency: ISO currency code for all rates in this card.
+            description: Optional notes.
+            models: Optional list of pricing entries, each:
+                {provider, model, input_rate, output_rate,
+                 cache_read_rate?, cache_write_rate?, request_rate?}
+                Rates are per 1,000,000 tokens (request_rate is per-request flat $).
+            active: Whether this card is active.
+
+        Returns:
+            The created RateCard.
+        """
+        if not name or not name.strip():
+            raise ValueError("Rate card name is required.")
+        currency = (currency or "USD").upper()
+        card = RateCard(
+            name=name.strip(),
+            currency=currency,
+            description=description,
+            active=active,
+        )
+        for entry in models or []:
+            pricing = ModelPricing(
+                input_rate=float(entry.get("input_rate", 0.0)),
+                output_rate=float(entry.get("output_rate", 0.0)),
+                cache_read_rate=float(entry.get("cache_read_rate", 0.0)),
+                cache_write_rate=float(entry.get("cache_write_rate", 0.0)),
+                request_rate=float(entry.get("request_rate", 0.0)),
+            )
+            card.set_pricing(
+                provider=entry["provider"],
+                model=entry["model"],
+                pricing=pricing,
+            )
+        return self.store.save_rate_card(card)
+
+    def get_rate_card(self, card_id: str) -> Optional[RateCard]:
+        """Get a rate card by ID."""
+        return self.store.get_rate_card(card_id)
+
+    def list_rate_cards(self, active_only: bool = False) -> list[RateCard]:
+        """List rate cards, optionally filtered to active only."""
+        return self.store.list_rate_cards(active_only=active_only)
+
+    def update_rate_card(self, card_id: str, **updates) -> RateCard:
+        """Update a rate card's metadata (name, currency, description, active).
+
+        For model pricing changes, use add_model_pricing / remove_model_pricing.
+        """
+        card = self.store.get_rate_card(card_id)
+        if not card:
+            raise ValueError(f"Rate card '{card_id}' not found.")
+        if "name" in updates:
+            if not updates["name"] or not str(updates["name"]).strip():
+                raise ValueError("Rate card name cannot be empty.")
+            card.name = str(updates["name"]).strip()
+        if "currency" in updates:
+            card.currency = str(updates["currency"]).upper()
+        if "description" in updates:
+            card.description = updates["description"]
+        if "active" in updates:
+            card.active = bool(updates["active"])
+        card.updated_at = datetime.now(tz=timezone.utc)
+        return self.store.save_rate_card(card)
+
+    def remove_rate_card(self, card_id: str) -> bool:
+        """Delete a rate card. Returns True if found and deleted."""
+        return self.store.delete_rate_card(card_id)
+
+    def add_model_pricing(
+        self,
+        card_id: str,
+        provider: str,
+        model: str,
+        input_rate: float,
+        output_rate: float,
+        cache_read_rate: float = 0.0,
+        cache_write_rate: float = 0.0,
+        request_rate: float = 0.0,
+    ) -> RateCard:
+        """Add or update per-token pricing for a provider+model on a rate card."""
+        card = self.store.get_rate_card(card_id)
+        if not card:
+            raise ValueError(f"Rate card '{card_id}' not found.")
+        if input_rate < 0 or output_rate < 0 or cache_read_rate < 0 or cache_write_rate < 0 or request_rate < 0:
+            raise ValueError("Pricing rates cannot be negative.")
+        pricing = ModelPricing(
+            input_rate=input_rate,
+            output_rate=output_rate,
+            cache_read_rate=cache_read_rate,
+            cache_write_rate=cache_write_rate,
+            request_rate=request_rate,
+        )
+        card.set_pricing(provider=provider, model=model, pricing=pricing)
+        return self.store.save_rate_card(card)
+
+    def remove_model_pricing(self, card_id: str, provider: str, model: str) -> RateCard:
+        """Remove pricing for a provider+model from a rate card."""
+        card = self.store.get_rate_card(card_id)
+        if not card:
+            raise ValueError(f"Rate card '{card_id}' not found.")
+        if not card.remove_pricing(provider=provider, model=model):
+            raise ValueError(f"No pricing found for {provider}:{model}.")
+        return self.store.save_rate_card(card)
+
+    def calculate_usage_cost(
+        self,
+        card_id: str,
+        provider: str,
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        request_count: int = 1,
+    ) -> Optional[float]:
+        """Calculate cost for usage against a rate card. Returns None if no pricing."""
+        card = self.store.get_rate_card(card_id)
+        if not card:
+            raise ValueError(f"Rate card '{card_id}' not found.")
+        return card.calculate_cost(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            request_count=request_count,
+        )
+
+    def record_usage_with_rate_card(
+        self,
+        card_id: str,
+        description: str,
+        provider: str,
+        model: str,
+        client_identifier: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        request_count: int = 1,
+        metadata: Optional[dict] = None,
+    ) -> UsageEvent:
+        """Record a usage event with cost auto-calculated from a rate card.
+
+        This is the key workflow: agent provides tokens + provider/model, the
+        rate card computes the cost. No manual cost entry needed.
+
+        Raises ValueError if the rate card has no pricing for provider+model.
+        """
+        card = self.store.get_rate_card(card_id)
+        if not card:
+            raise ValueError(f"Rate card '{card_id}' not found.")
+        cost = card.calculate_cost(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            request_count=request_count,
+        )
+        if cost is None:
+            raise ValueError(
+                f"Rate card '{card.name}' has no pricing for {provider}:{model}. "
+                f"Use add_model_pricing to set it."
+            )
+        return self.record_usage(
+            description=description,
+            cost=cost,
+            client_identifier=client_identifier,
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            request_count=request_count,
+            currency=card.currency,
+            metadata=metadata or {},
+        )
+
+    def batch_record_usage(
+        self,
+        events: list[dict],
+        card_id: Optional[str] = None,
+    ) -> BatchUsageResult:
+        """Record multiple usage events in one call.
+
+        Each event dict: {description, provider, model, input_tokens,
+        output_tokens?, cache_read_tokens?, cache_write_tokens?,
+        request_count?, client?, cost?, metadata?}
+
+        If card_id is provided, cost is auto-calculated per event (overrides
+        any explicit cost). Otherwise each event must include 'cost'.
+
+        Returns a BatchUsageResult with totals, per-event IDs, and any errors.
+        """
+        if not events:
+            raise ValueError("No events provided.")
+        card = None
+        if card_id:
+            card = self.store.get_rate_card(card_id)
+            if not card:
+                raise ValueError(f"Rate card '{card_id}' not found.")
+
+        result = BatchUsageResult()
+        if card:
+            result.currency = card.currency
+
+        for i, ev in enumerate(events):
+            try:
+                provider = ev["provider"]
+                model = ev["model"]
+                description = ev.get("description", f"{provider}/{model} usage")
+                input_tokens = int(ev.get("input_tokens", 0))
+                output_tokens = int(ev.get("output_tokens", 0))
+                cache_read_tokens = int(ev.get("cache_read_tokens", 0))
+                cache_write_tokens = int(ev.get("cache_write_tokens", 0))
+                request_count = int(ev.get("request_count", 1))
+
+                if card:
+                    cost = card.calculate_cost(
+                        provider=provider,
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_tokens=cache_write_tokens,
+                        request_count=request_count,
+                    )
+                    if cost is None:
+                        raise ValueError(
+                            f"No pricing for {provider}:{model} on card '{card.name}'."
+                        )
+                    currency = card.currency
+                else:
+                    if "cost" not in ev:
+                        raise ValueError(
+                            f"Event {i} has no 'cost' and no card_id provided."
+                        )
+                    cost = float(ev["cost"])
+                    currency = (ev.get("currency") or "USD").upper()
+
+                event = self.record_usage(
+                    description=description,
+                    cost=cost,
+                    client_identifier=ev.get("client"),
+                    provider=provider,
+                    model=model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_tokens=cache_write_tokens,
+                    request_count=request_count,
+                    currency=currency,
+                    metadata=ev.get("metadata"),
+                )
+                result.event_ids.append(event.id)
+                result.total_recorded += 1
+                result.total_cost = round(result.total_cost + cost, 6)
+            except (ValueError, KeyError) as e:
+                result.total_failed += 1
+                result.errors.append({"index": i, "error": str(e)})
+
+        return result
+
+    # ===================================================================
+    # v1.0.0 — Subscription Plans
+    # ===================================================================
+
+    def create_plan(
+        self,
+        name: str,
+        price: float,
+        currency: str = "USD",
+        billing_cycle: str = "monthly",
+        description: Optional[str] = None,
+        trial_days: int = 0,
+        tax_rate: float = 0.0,
+        due_days: int = 15,
+        active: bool = True,
+        quota_requests: Optional[int] = None,
+        quota_tokens: Optional[int] = None,
+        overage_rate: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> SubscriptionPlan:
+        """Create a reusable subscription plan.
+
+        Args:
+            name: Plan name (e.g. "Pro Agent").
+            price: Price per billing cycle.
+            currency: ISO currency code.
+            billing_cycle: daily, weekly, monthly, quarterly, yearly.
+            trial_days: Free trial length (0 = no trial).
+            tax_rate: Tax percentage.
+            due_days: Days after generation that invoices are due.
+            active: Whether the plan is available for new subscriptions.
+            quota_requests: Max API requests per period (optional).
+            quota_tokens: Max tokens per period (optional).
+            overage_rate: $ per unit over quota (optional).
+            metadata: Arbitrary tags.
+
+        Returns:
+            The created SubscriptionPlan.
+        """
+        if not name or not name.strip():
+            raise ValueError("Plan name is required.")
+        cycle = BillingCycle(billing_cycle.lower()) if isinstance(billing_cycle, str) else billing_cycle
+        plan = SubscriptionPlan(
+            name=name.strip(),
+            price=price,
+            currency=(currency or "USD").upper(),
+            billing_cycle=cycle,
+            description=description,
+            trial_days=trial_days,
+            tax_rate=tax_rate,
+            due_days=due_days,
+            active=active,
+            quota_requests=quota_requests,
+            quota_tokens=quota_tokens,
+            overage_rate=overage_rate,
+            metadata=metadata or {},
+        )
+        return self.store.save_plan(plan)
+
+    def get_plan(self, plan_id: str) -> Optional[SubscriptionPlan]:
+        """Get a subscription plan by ID."""
+        return self.store.get_plan(plan_id)
+
+    def list_plans(self, active_only: bool = False) -> list[SubscriptionPlan]:
+        """List subscription plans, optionally filtered to active."""
+        return self.store.list_plans(active_only=active_only)
+
+    def update_plan(self, plan_id: str, **updates) -> SubscriptionPlan:
+        """Update a plan's mutable fields. Price, name, tax, quotas, active, etc."""
+        plan = self.store.get_plan(plan_id)
+        if not plan:
+            raise ValueError(f"Plan '{plan_id}' not found.")
+        if "name" in updates:
+            if not str(updates["name"]).strip():
+                raise ValueError("Plan name cannot be empty.")
+            plan.name = str(updates["name"]).strip()
+        if "price" in updates:
+            plan.price = float(updates["price"])
+            if plan.price < 0:
+                raise ValueError("Plan price cannot be negative.")
+        if "currency" in updates:
+            plan.currency = str(updates["currency"]).upper()
+        if "billing_cycle" in updates:
+            plan.billing_cycle = BillingCycle(updates["billing_cycle"].lower())
+        if "description" in updates:
+            plan.description = updates["description"]
+        if "trial_days" in updates:
+            plan.trial_days = int(updates["trial_days"])
+        if "tax_rate" in updates:
+            plan.tax_rate = float(updates["tax_rate"])
+        if "due_days" in updates:
+            plan.due_days = int(updates["due_days"])
+        if "quota_requests" in updates:
+            plan.quota_requests = updates["quota_requests"]
+        if "quota_tokens" in updates:
+            plan.quota_tokens = updates["quota_tokens"]
+        if "overage_rate" in updates:
+            plan.overage_rate = updates["overage_rate"]
+        if "active" in updates:
+            plan.active = bool(updates["active"])
+        if "metadata" in updates:
+            plan.metadata = updates["metadata"]
+        plan.updated_at = datetime.now(tz=timezone.utc)
+        return self.store.save_plan(plan)
+
+    def remove_plan(self, plan_id: str) -> bool:
+        """Delete a plan. Active subscriptions referencing it are unaffected."""
+        return self.store.delete_plan(plan_id)
+
+    def seed_builtin_plans(self, overwrite: bool = False) -> list[SubscriptionPlan]:
+        """Create the built-in agent subscription plans (Starter/Pro/Enterprise).
+
+        Args:
+            overwrite: If True, replace existing plans with the same IDs.
+
+        Returns:
+            List of created (or existing) plans.
+        """
+        created = []
+        for entry in BUILTIN_PLANS:
+            existing = self.store.get_plan(entry["id"])
+            if existing and not overwrite:
+                created.append(existing)
+                continue
+            plan = SubscriptionPlan(
+                id=entry["id"],
+                name=entry["name"],
+                description=entry.get("description"),
+                price=entry["price"],
+                currency=entry.get("currency", "USD"),
+                billing_cycle=BillingCycle(entry.get("billing_cycle", "monthly")),
+                trial_days=entry.get("trial_days", 0),
+                quota_requests=entry.get("quota_requests"),
+                quota_tokens=entry.get("quota_tokens"),
+            )
+            created.append(self.store.save_plan(plan))
+        return created
+
+    # ===================================================================
+    # v1.0.0 — Subscriptions (recurring billing lifecycle)
+    # ===================================================================
+
+    def create_subscription(
+        self,
+        client_identifier: str,
+        plan_id: str,
+        start_date: Optional[date] = None,
+        metadata: Optional[dict] = None,
+    ) -> Subscription:
+        """Subscribe a client to a plan.
+
+        Initializes trial if the plan has trial days. If no trial, the
+        subscription is active and immediately billable.
+
+        Args:
+            client_identifier: Client ID or name.
+            plan_id: The plan to subscribe to.
+            start_date: Subscription start (defaults to today).
+            metadata: Arbitrary tags.
+
+        Returns:
+            The created Subscription.
+        """
+        client = self.get_client(client_identifier)
+        if not client:
+            raise ValueError(f"Client '{client_identifier}' not found.")
+        plan = self.store.get_plan(plan_id)
+        if not plan:
+            raise ValueError(f"Plan '{plan_id}' not found.")
+        if not plan.active:
+            raise ValueError(f"Plan '{plan.name}' is not active.")
+
+        sub = Subscription(
+            client_id=client.id,
+            client_name=client.name,
+            plan_id=plan.id,
+            plan_name=plan.name,
+            price=plan.price,
+            currency=plan.currency,
+            billing_cycle=plan.billing_cycle,
+            tax_rate=plan.tax_rate,
+            due_days=plan.due_days,
+            trial_days=plan.trial_days,
+            start_date=start_date or date.today(),
+            metadata=metadata or {},
+        )
+        sub.init_trial()
+        return self.store.save_subscription(sub)
+
+    def get_subscription(self, sub_id: str) -> Optional[Subscription]:
+        """Get a subscription by ID."""
+        return self.store.get_subscription(sub_id)
+
+    def list_subscriptions(
+        self,
+        client_identifier: Optional[str] = None,
+        plan_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[Subscription]:
+        """List subscriptions with optional filters."""
+        client_id = None
+        if client_identifier:
+            c = self.get_client(client_identifier)
+            if c:
+                client_id = c.id
+        status_enum = None
+        if status:
+            status_enum = SubscriptionStatus(status.lower())
+        return self.store.list_subscriptions(
+            client_id=client_id,
+            plan_id=plan_id,
+            status=status_enum,
+        )
+
+    def cancel_subscription(self, sub_id: str, immediately: bool = False) -> Subscription:
+        """Cancel a subscription. If not immediate, stays active until period end."""
+        sub = self.store.get_subscription(sub_id)
+        if not sub:
+            raise ValueError(f"Subscription '{sub_id}' not found.")
+        if sub.status == SubscriptionStatus.CANCELLED:
+            raise ValueError(f"Subscription '{sub_id}' is already cancelled.")
+        sub.cancel(immediately=immediately)
+        return self.store.save_subscription(sub)
+
+    def pause_subscription(self, sub_id: str) -> Subscription:
+        """Pause a subscription. Billing resumes on resume."""
+        sub = self.store.get_subscription(sub_id)
+        if not sub:
+            raise ValueError(f"Subscription '{sub_id}' not found.")
+        sub.pause()
+        return self.store.save_subscription(sub)
+
+    def resume_subscription(self, sub_id: str) -> Subscription:
+        """Resume a paused subscription."""
+        sub = self.store.get_subscription(sub_id)
+        if not sub:
+            raise ValueError(f"Subscription '{sub_id}' not found.")
+        sub.resume()
+        return self.store.save_subscription(sub)
+
+    def remove_subscription(self, sub_id: str) -> bool:
+        """Delete a subscription record. Does NOT cancel invoices already issued."""
+        return self.store.delete_subscription(sub_id)
+
+    def generate_subscription_invoice(self, sub_id: str) -> Invoice:
+        """Generate an invoice for a subscription's current billing period.
+
+        Only billable subscriptions (active or past_due) can be invoiced.
+        After generating, the subscription advances to the next period.
+
+        Args:
+            sub_id: The subscription to bill.
+
+        Returns:
+            The generated Invoice.
+        """
+        sub = self.store.get_subscription(sub_id)
+        if not sub:
+            raise ValueError(f"Subscription '{sub_id}' not found.")
+        if not sub.is_billable:
+            raise ValueError(
+                f"Subscription '{sub_id}' is {sub.status.value} — only active "
+                f"or past_due subscriptions can be invoiced."
+            )
+
+        line_items = [
+            {
+                "description": li.description,
+                "quantity": li.quantity,
+                "unit_price": li.unit_price,
+                "tax_rate": li.tax_rate,
+            }
+            for li in sub.generate_line_items()
+        ]
+        inv = self.create_invoice(
+            client_identifier=sub.client_id,
+            line_items=line_items,
+            due_days=sub.due_days,
+            currency=sub.currency,
+            notes=f"Subscription billing: {sub.plan_name} "
+                  f"({sub.current_period_start} to {sub.current_period_end})",
+        )
+        sub.last_invoice_id = inv.id
+        sub.invoice_ids.append(inv.id)
+        sub.advance_period()
+        self.store.save_subscription(sub)
+        return inv
+
+    def process_due_subscriptions(self, as_of: Optional[date] = None) -> list[Invoice]:
+        """Generate invoices for all subscriptions due for billing.
+
+        A subscription is due if it's billable and next_billing_date <= as_of.
+
+        Args:
+            as_of: Cutoff date (defaults to today).
+
+        Returns:
+            List of generated invoices.
+        """
+        as_of = as_of or date.today()
+        generated = []
+        for sub in self.store.list_subscriptions():
+            if not sub.is_billable:
+                continue
+            if sub.next_billing_date is None:
+                continue
+            if sub.next_billing_date <= as_of:
+                try:
+                    inv = self.generate_subscription_invoice(sub.id)
+                    generated.append(inv)
+                except ValueError:
+                    # Skip subs that error out (e.g. no client)
+                    continue
+        return generated
+
+    def get_mrr_summary(self, currency: Optional[str] = None) -> MRRSummary:
+        """Compute Monthly Recurring Revenue summary across all subscriptions.
+
+        Args:
+            currency: Filter to a specific currency.
+
+        Returns:
+            MRRSummary with counts, MRR, ARR, and breakdowns.
+        """
+        subs = self.store.list_subscriptions()
+        if currency:
+            currency = currency.upper()
+            subs = [s for s in subs if s.currency == currency]
+        summary_currency = currency or "USD"
+
+        active = [s for s in subs if s.status == SubscriptionStatus.ACTIVE]
+        trialing = [s for s in subs if s.status == SubscriptionStatus.TRIALING]
+        past_due = [s for s in subs if s.status == SubscriptionStatus.PAST_DUE]
+        paused = [s for s in subs if s.status == SubscriptionStatus.PAUSED]
+        cancelled = [s for s in subs if s.status == SubscriptionStatus.CANCELLED]
+
+        mrr = round(sum(s.monthly_revenue for s in active + past_due), 2)
+        trial_mrr = round(sum(s.monthly_revenue for s in trialing), 2)
+        paused_mrr = round(sum(s.monthly_revenue for s in paused), 2)
+
+        billable = active + past_due
+        avg_value = round(mrr / len(billable), 2) if billable else 0.0
+
+        # By plan
+        plan_map: dict[str, dict] = {}
+        for s in billable:
+            key = s.plan_id
+            if key not in plan_map:
+                plan_map[key] = {
+                    "plan_id": s.plan_id,
+                    "plan_name": s.plan_name or s.plan_id,
+                    "count": 0,
+                    "mrr": 0.0,
+                }
+            plan_map[key]["count"] += 1
+            plan_map[key]["mrr"] = round(plan_map[key]["mrr"] + s.monthly_revenue, 2)
+
+        # By billing cycle
+        cycle_map: dict[str, dict] = {}
+        for s in billable:
+            key = s.billing_cycle.value
+            if key not in cycle_map:
+                cycle_map[key] = {"cycle": key, "count": 0, "mrr": 0.0}
+            cycle_map[key]["count"] += 1
+            cycle_map[key]["mrr"] = round(cycle_map[key]["mrr"] + s.monthly_revenue, 2)
+
+        # Top clients by MRR
+        client_map: dict[str, dict] = {}
+        for s in billable:
+            key = s.client_id
+            if key not in client_map:
+                client_map[key] = {
+                    "client_id": s.client_id,
+                    "client_name": s.client_name or s.client_id,
+                    "plan_name": s.plan_name,
+                    "mrr": 0.0,
+                }
+            client_map[key]["mrr"] = round(client_map[key]["mrr"] + s.monthly_revenue, 2)
+        top_clients = sorted(
+            client_map.values(), key=lambda c: c["mrr"], reverse=True
+        )[:10]
+
+        return MRRSummary(
+            currency=summary_currency,
+            active_count=len(active),
+            trialing_count=len(trialing),
+            past_due_count=len(past_due),
+            paused_count=len(paused),
+            cancelled_count=len(cancelled),
+            total_count=len(subs),
+            mrr=mrr,
+            arr=round(mrr * 12, 2),
+            trial_mrr=trial_mrr,
+            paused_mrr=paused_mrr,
+            lost_mrr=0.0,
+            by_plan=sorted(plan_map.values(), key=lambda p: p["mrr"], reverse=True),
+            by_cycle=sorted(cycle_map.values(), key=lambda c: c["mrr"], reverse=True),
+            top_clients=top_clients,
+            avg_subscription_value=avg_value,
         )

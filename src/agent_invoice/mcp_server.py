@@ -1447,6 +1447,295 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # ----- v1.0.0: Rate Cards -----
+        Tool(
+            name="create_rate_card",
+            description="Create a rate card mapping provider+model to per-token pricing. Lets agents record usage with just tokens — the card computes cost automatically.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Human-readable name (e.g. 'Production 2026-Q3')"},
+                    "currency": {"type": "string", "description": "Currency code (default USD)"},
+                    "description": {"type": "string"},
+                    "active": {"type": "boolean", "default": True},
+                    "models": {
+                        "type": "array",
+                        "description": "Initial pricing entries",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {"type": "string"},
+                                "model": {"type": "string"},
+                                "input_rate": {"type": "number", "description": "$ per 1M input tokens"},
+                                "output_rate": {"type": "number", "description": "$ per 1M output tokens"},
+                                "cache_read_rate": {"type": "number", "description": "$ per 1M cache-read tokens"},
+                                "cache_write_rate": {"type": "number", "description": "$ per 1M cache-write tokens"},
+                                "request_rate": {"type": "number", "description": "$ flat per request"},
+                            },
+                            "required": ["provider", "model", "input_rate", "output_rate"],
+                        },
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="list_rate_cards",
+            description="List rate cards. Set active_only=true to filter to active cards.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "active_only": {"type": "boolean", "default": False},
+                },
+            },
+        ),
+        Tool(
+            name="get_rate_card",
+            description="Get a rate card with all its model pricing.",
+            inputSchema={
+                "type": "object",
+                "properties": {"card_id": {"type": "string"}},
+                "required": ["card_id"],
+            },
+        ),
+        Tool(
+            name="add_model_pricing",
+            description="Add or update per-token pricing for a provider+model on a rate card.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "card_id": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "model": {"type": "string"},
+                    "input_rate": {"type": "number", "description": "$ per 1M input tokens"},
+                    "output_rate": {"type": "number", "description": "$ per 1M output tokens"},
+                    "cache_read_rate": {"type": "number"},
+                    "cache_write_rate": {"type": "number"},
+                    "request_rate": {"type": "number", "description": "$ flat per request"},
+                },
+                "required": ["card_id", "provider", "model", "input_rate", "output_rate"],
+            },
+        ),
+        Tool(
+            name="remove_model_pricing",
+            description="Remove pricing for a provider+model from a rate card.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "card_id": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "model": {"type": "string"},
+                },
+                "required": ["card_id", "provider", "model"],
+            },
+        ),
+        Tool(
+            name="record_usage_with_rate_card",
+            description="Record a usage event with cost auto-calculated from a rate card. Provide tokens + provider + model; the card computes the dollar cost.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "card_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "model": {"type": "string"},
+                    "client": {"type": "string", "description": "Client ID or name"},
+                    "input_tokens": {"type": "integer", "default": 0},
+                    "output_tokens": {"type": "integer", "default": 0},
+                    "cache_read_tokens": {"type": "integer", "default": 0},
+                    "cache_write_tokens": {"type": "integer", "default": 0},
+                    "request_count": {"type": "integer", "default": 1},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["card_id", "description", "provider", "model"],
+            },
+        ),
+        Tool(
+            name="remove_rate_card",
+            description="Delete a rate card.",
+            inputSchema={
+                "type": "object",
+                "properties": {"card_id": {"type": "string"}},
+                "required": ["card_id"],
+            },
+        ),
+        # ----- v1.0.0: Subscription Plans -----
+        Tool(
+            name="create_plan",
+            description="Create a reusable subscription plan. Defines pricing, billing cycle, trial period, and optional usage quotas.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "price": {"type": "number", "description": "Price per billing cycle"},
+                    "currency": {"type": "string", "default": "USD"},
+                    "billing_cycle": {"type": "string", "enum": ["daily", "weekly", "monthly", "quarterly", "yearly"], "default": "monthly"},
+                    "description": {"type": "string"},
+                    "trial_days": {"type": "integer", "default": 0},
+                    "tax_rate": {"type": "number", "default": 0},
+                    "due_days": {"type": "integer", "default": 15},
+                    "quota_requests": {"type": "integer", "description": "Max API requests per period"},
+                    "quota_tokens": {"type": "integer", "description": "Max tokens per period"},
+                    "overage_rate": {"type": "number", "description": "$ per unit over quota"},
+                },
+                "required": ["name", "price"],
+            },
+        ),
+        Tool(
+            name="list_plans",
+            description="List subscription plans. Set active_only=true to exclude deprecated plans.",
+            inputSchema={
+                "type": "object",
+                "properties": {"active_only": {"type": "boolean", "default": False}},
+            },
+        ),
+        Tool(
+            name="get_plan",
+            description="Get a subscription plan by ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {"plan_id": {"type": "string"}},
+                "required": ["plan_id"],
+            },
+        ),
+        Tool(
+            name="update_plan",
+            description="Update a subscription plan's fields (name, price, currency, billing_cycle, trial_days, tax_rate, due_days, quotas, active).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "price": {"type": "number"},
+                    "currency": {"type": "string"},
+                    "billing_cycle": {"type": "string", "enum": ["daily", "weekly", "monthly", "quarterly", "yearly"]},
+                    "description": {"type": "string"},
+                    "trial_days": {"type": "integer"},
+                    "tax_rate": {"type": "number"},
+                    "due_days": {"type": "integer"},
+                    "quota_requests": {"type": "integer"},
+                    "quota_tokens": {"type": "integer"},
+                    "overage_rate": {"type": "number"},
+                    "active": {"type": "boolean"},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["plan_id"],
+            },
+        ),
+        Tool(
+            name="remove_plan",
+            description="Delete a subscription plan. Existing subscriptions are unaffected.",
+            inputSchema={
+                "type": "object",
+                "properties": {"plan_id": {"type": "string"}},
+                "required": ["plan_id"],
+            },
+        ),
+        Tool(
+            name="seed_builtin_plans",
+            description="Create the built-in agent subscription plans (Starter $49, Pro $199, Enterprise $999, Annual Pro $1990). Idempotent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "overwrite": {"type": "boolean", "default": False, "description": "Replace existing plans with the same IDs"},
+                },
+            },
+        ),
+        # ----- v1.0.0: Subscriptions -----
+        Tool(
+            name="create_subscription",
+            description="Subscribe a client to a plan. Initializes trial if the plan has trial days; otherwise activates immediately.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string", "description": "Client ID or name"},
+                    "plan_id": {"type": "string"},
+                    "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD); defaults to today"},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["client", "plan_id"],
+            },
+        ),
+        Tool(
+            name="list_subscriptions",
+            description="List subscriptions with optional filters.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client": {"type": "string"},
+                    "plan_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["trialing", "active", "past_due", "paused", "cancelled", "expired"]},
+                },
+            },
+        ),
+        Tool(
+            name="get_subscription",
+            description="Get a subscription by ID, including lifecycle state and billing history.",
+            inputSchema={
+                "type": "object",
+                "properties": {"subscription_id": {"type": "string"}},
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="generate_subscription_invoice",
+            description="Generate an invoice for a subscription's current billing period and advance to the next period.",
+            inputSchema={
+                "type": "object",
+                "properties": {"subscription_id": {"type": "string"}},
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="process_due_subscriptions",
+            description="Generate invoices for all subscriptions due for billing (billable and next_billing_date <= today). Returns generated invoices.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "as_of": {"type": "string", "description": "Cutoff date (YYYY-MM-DD); defaults to today"},
+                },
+            },
+        ),
+        Tool(
+            name="cancel_subscription",
+            description="Cancel a subscription. Set immediately=true to end now; otherwise stays active until period end.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {"type": "string"},
+                    "immediately": {"type": "boolean", "default": False},
+                },
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="pause_subscription",
+            description="Pause a subscription. Billing resumes on resume.",
+            inputSchema={
+                "type": "object",
+                "properties": {"subscription_id": {"type": "string"}},
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="resume_subscription",
+            description="Resume a paused subscription.",
+            inputSchema={
+                "type": "object",
+                "properties": {"subscription_id": {"type": "string"}},
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="get_mrr_summary",
+            description="Monthly Recurring Revenue dashboard: MRR, ARR, trial/paused/lost MRR, breakdowns by plan, cycle, and top clients.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "currency": {"type": "string", "description": "Filter to a specific currency"},
+                },
+            },
+        ),
     ]
 
 
@@ -2592,6 +2881,245 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             currency=arguments.get("currency"),
         )
         return _json_result(comparison.model_dump(mode="json"))
+
+    # ----- v1.0.0: Rate Cards -----
+    elif name == "create_rate_card":
+        try:
+            card = svc.create_rate_card(
+                name=arguments["name"],
+                currency=arguments.get("currency", "USD"),
+                description=arguments.get("description"),
+                models=arguments.get("models"),
+                active=arguments.get("active", True),
+            )
+            return _json_result({"id": card.id, "name": card.name, "currency": card.currency, "active": card.active, "model_count": len(card.models)})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_rate_cards":
+        cards = svc.list_rate_cards(active_only=arguments.get("active_only", False))
+        return _json_result([
+            {"id": c.id, "name": c.name, "currency": c.currency, "active": c.active, "model_count": len(c.models)}
+            for c in cards
+        ])
+
+    elif name == "get_rate_card":
+        card = svc.get_rate_card(arguments["card_id"])
+        if not card:
+            return _text_result(f"Rate card not found: {arguments['card_id']}")
+        data = card.model_dump(mode="json")
+        data["models"] = card.list_models()
+        return _json_result(data)
+
+    elif name == "add_model_pricing":
+        try:
+            card = svc.add_model_pricing(
+                card_id=arguments["card_id"],
+                provider=arguments["provider"],
+                model=arguments["model"],
+                input_rate=arguments["input_rate"],
+                output_rate=arguments["output_rate"],
+                cache_read_rate=arguments.get("cache_read_rate", 0.0),
+                cache_write_rate=arguments.get("cache_write_rate", 0.0),
+                request_rate=arguments.get("request_rate", 0.0),
+            )
+            return _json_result({"id": card.id, "model_count": len(card.models)})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_model_pricing":
+        try:
+            card = svc.remove_model_pricing(
+                card_id=arguments["card_id"],
+                provider=arguments["provider"],
+                model=arguments["model"],
+            )
+            return _json_result({"id": card.id, "model_count": len(card.models)})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "record_usage_with_rate_card":
+        try:
+            event = svc.record_usage_with_rate_card(
+                card_id=arguments["card_id"],
+                description=arguments["description"],
+                provider=arguments["provider"],
+                model=arguments["model"],
+                client_identifier=arguments.get("client"),
+                input_tokens=arguments.get("input_tokens", 0),
+                output_tokens=arguments.get("output_tokens", 0),
+                cache_read_tokens=arguments.get("cache_read_tokens", 0),
+                cache_write_tokens=arguments.get("cache_write_tokens", 0),
+                request_count=arguments.get("request_count", 1),
+                metadata=arguments.get("metadata"),
+            )
+            return _json_result({"id": event.id, "cost": event.cost, "currency": event.currency, "provider": event.provider, "model": event.model})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_rate_card":
+        deleted = svc.remove_rate_card(arguments["card_id"])
+        return _text_result(f"Rate card {'deleted' if deleted else 'not found'}: {arguments['card_id']}")
+
+    # ----- v1.0.0: Subscription Plans -----
+    elif name == "create_plan":
+        try:
+            plan = svc.create_plan(
+                name=arguments["name"],
+                price=arguments["price"],
+                currency=arguments.get("currency", "USD"),
+                billing_cycle=arguments.get("billing_cycle", "monthly"),
+                description=arguments.get("description"),
+                trial_days=arguments.get("trial_days", 0),
+                tax_rate=arguments.get("tax_rate", 0.0),
+                due_days=arguments.get("due_days", 15),
+                active=arguments.get("active", True),
+                quota_requests=arguments.get("quota_requests"),
+                quota_tokens=arguments.get("quota_tokens"),
+                overage_rate=arguments.get("overage_rate"),
+                metadata=arguments.get("metadata"),
+            )
+            return _json_result({"id": plan.id, "name": plan.name, "price": plan.price, "currency": plan.currency, "billing_cycle": plan.billing_cycle.value, "monthly_price": plan.monthly_price})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_plans":
+        plans = svc.list_plans(active_only=arguments.get("active_only", False))
+        return _json_result([
+            {"id": p.id, "name": p.name, "price": p.price, "currency": p.currency, "billing_cycle": p.billing_cycle.value, "monthly_price": p.monthly_price, "trial_days": p.trial_days, "active": p.active}
+            for p in plans
+        ])
+
+    elif name == "get_plan":
+        plan = svc.get_plan(arguments["plan_id"])
+        if not plan:
+            return _text_result(f"Plan not found: {arguments['plan_id']}")
+        return _json_result(plan.model_dump(mode="json"))
+
+    elif name == "update_plan":
+        try:
+            plan = svc.update_plan(arguments["plan_id"], **{k: v for k, v in arguments.items() if k != "plan_id"})
+            return _json_result({"id": plan.id, "name": plan.name, "price": plan.price, "active": plan.active})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "remove_plan":
+        deleted = svc.remove_plan(arguments["plan_id"])
+        return _text_result(f"Plan {'deleted' if deleted else 'not found'}: {arguments['plan_id']}")
+
+    elif name == "seed_builtin_plans":
+        plans = svc.seed_builtin_plans(overwrite=arguments.get("overwrite", False))
+        return _json_result({"created_or_existing": len(plans), "plans": [{"id": p.id, "name": p.name, "price": p.price} for p in plans]})
+
+    # ----- v1.0.0: Subscriptions -----
+    elif name == "create_subscription":
+        try:
+            from datetime import date as date_type
+            start_date = None
+            if "start_date" in arguments:
+                try:
+                    start_date = date_type.fromisoformat(arguments["start_date"])
+                except ValueError:
+                    return _text_result(f"Error: Invalid date format: {arguments['start_date']}. Use YYYY-MM-DD.")
+            sub = svc.create_subscription(
+                client_identifier=arguments["client"],
+                plan_id=arguments["plan_id"],
+                start_date=start_date,
+                metadata=arguments.get("metadata"),
+            )
+            return _json_result({
+                "id": sub.id,
+                "client": sub.client_name,
+                "plan": sub.plan_name,
+                "status": sub.status.value,
+                "price": sub.price,
+                "currency": sub.currency,
+                "billing_cycle": sub.billing_cycle.value,
+                "next_billing_date": str(sub.next_billing_date) if sub.next_billing_date else None,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "list_subscriptions":
+        subs = svc.list_subscriptions(
+            client_identifier=arguments.get("client"),
+            plan_id=arguments.get("plan_id"),
+            status=arguments.get("status"),
+        )
+        return _json_result([
+            {
+                "id": s.id,
+                "client": s.client_name,
+                "plan": s.plan_name,
+                "status": s.status.value,
+                "price": s.price,
+                "currency": s.currency,
+                "monthly_revenue": s.monthly_revenue,
+                "next_billing_date": str(s.next_billing_date) if s.next_billing_date else None,
+            }
+            for s in subs
+        ])
+
+    elif name == "get_subscription":
+        sub = svc.get_subscription(arguments["subscription_id"])
+        if not sub:
+            return _text_result(f"Subscription not found: {arguments['subscription_id']}")
+        data = sub.model_dump(mode="json")
+        data["monthly_revenue"] = sub.monthly_revenue
+        data["is_billable"] = sub.is_billable
+        return _json_result(data)
+
+    elif name == "generate_subscription_invoice":
+        try:
+            inv = svc.generate_subscription_invoice(arguments["subscription_id"])
+            return _json_result({
+                "invoice_id": inv.id,
+                "client": inv.client_name,
+                "total": inv.total,
+                "currency": inv.currency,
+                "status": inv.status.value,
+            })
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "process_due_subscriptions":
+        from datetime import date as date_type
+        as_of = None
+        if "as_of" in arguments:
+            try:
+                as_of = date_type.fromisoformat(arguments["as_of"])
+            except ValueError:
+                return _text_result(f"Error: Invalid date format: {arguments['as_of']}. Use YYYY-MM-DD.")
+        invoices = svc.process_due_subscriptions(as_of=as_of)
+        return _json_result({
+            "generated": len(invoices),
+            "invoices": [{"id": inv.id, "client": inv.client_name, "total": inv.total, "currency": inv.currency} for inv in invoices],
+        })
+
+    elif name == "cancel_subscription":
+        try:
+            sub = svc.cancel_subscription(arguments["subscription_id"], immediately=arguments.get("immediately", False))
+            return _json_result({"id": sub.id, "status": sub.status.value, "cancelled_at": str(sub.cancelled_at) if sub.cancelled_at else None})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "pause_subscription":
+        try:
+            sub = svc.pause_subscription(arguments["subscription_id"])
+            return _json_result({"id": sub.id, "status": sub.status.value})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "resume_subscription":
+        try:
+            sub = svc.resume_subscription(arguments["subscription_id"])
+            return _json_result({"id": sub.id, "status": sub.status.value, "next_billing_date": str(sub.next_billing_date) if sub.next_billing_date else None})
+        except ValueError as e:
+            return _text_result(f"Error: {e}")
+
+    elif name == "get_mrr_summary":
+        summary = svc.get_mrr_summary(currency=arguments.get("currency"))
+        return _json_result(summary.model_dump(mode="json"))
 
     return _text_result(f"Unknown tool: {name}")
 

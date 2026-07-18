@@ -6,9 +6,9 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests: 493](https://img.shields.io/badge/tests-493%20passing-brightgreen.svg)](#testing)
+[![Tests: 642](https://img.shields.io/badge/tests-642%20passing-brightgreen.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
-[![Version: 0.7.0](https://img.shields.io/badge/version-0.7.0-blue.svg)](#changelog)
+[![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](#changelog)
 
 </div>
 
@@ -455,7 +455,7 @@ agent-invoice/
 │   ├── store.py        # JSON file storage with numbering config
 │   ├── service.py      # Business logic layer (50+ methods)
 │   ├── cli.py          # Click CLI with 40+ commands
-│   ├── mcp_server.py   # MCP server with 55 tools
+│   ├── mcp_server.py   # MCP server with 101 tools
 │   ├── api.py          # FastAPI REST API
 │   └── pdf.py          # PDF export with reportlab
 ├── tests/              # 413 tests (models, store, service, CLI, API, MCP, estimates, reports)
@@ -469,3 +469,30 @@ Invoices, clients, recurring templates, credit notes, dunning actions, and templ
 ## License
 
 MIT
+
+## Changelog
+
+### v1.0.0 — Rate Cards & Subscriptions (Recurring Billing)
+**The first MCP server to unify usage metering → automatic cost calculation → subscription billing → invoicing.**
+
+- **Rate Cards**: Define per-token pricing for any provider+model (OpenAI, Anthropic, etc.). Record usage with just tokens — the rate card calculates the cost automatically. No manual cost entry.
+  - Per-million-token rates: input, output, cache-read, cache-write
+  - Per-request flat surcharge support
+  - Multiple rate cards (production, enterprise, dev) with activate/deactivate
+- **Subscriptions**: Full recurring billing lifecycle — plans, trial periods, active/past-due/canceled/paused states, automatic invoice generation per billing cycle.
+  - Plan catalogs with tiered pricing (daily/weekly/monthly/quarterly/yearly)
+  - Trial support with configurable duration
+  - Pause/resume, cancel with effective dates
+  - Auto-invoice generation on cycle renewal
+- **MRR Reporting**: Monthly recurring revenue summaries, subscription growth metrics, churn tracking.
+- **Batch Usage Recording**: Log hundreds of usage events in a single call with automatic cost calculation via rate cards.
+- **22 new MCP tools** (101 total), **66 new tests** (642 total, all passing).
+
+### v0.9.0 — Usage Analytics & Cost Intelligence
+- Provider cost analysis, model comparison, cost trends, anomaly detection
+- 5 new analytics MCP tools
+
+### v0.8.0 — Usage Metering & Agent Billing
+- UsageEvent model, usage summaries, aggregate → invoice → mark billed lifecycle
+- Markup support for reseller margins
+- 6 new metering MCP tools
